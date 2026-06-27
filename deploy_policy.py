@@ -11,6 +11,7 @@ from pi3.models.pi3 import Pi3
 
 from gap_policy.policy.gap import GAPPolicy
 from gap_policy.model.vision.dinov3_encoder import DINOV3
+from gap_policy.latent_modes import mask_key_for_mode
 from gap_policy.triadic import TriadicConfig, build_triadic_state
 
 
@@ -179,6 +180,9 @@ class GAPPolicyWrapper:
             mode=policy_cfg.get("triadic_mode", "disabled"),
             include_grippers=policy_cfg.get("triadic_include_grippers", True),
         )
+        self.latent_mode = getattr(self.policy_model, "latent_mode", policy_cfg.get("latent_mode", "pi3_full"))
+        self.latent_mask_key = mask_key_for_mode(self.latent_mode)
+        self.eef_mask_radius_tokens = float(os.environ.get("GAP_EEF_MASK_RADIUS_TOKENS", "2.5"))
 
     def reset(self):
         """Reset policy state between episodes (GAP is stateless)"""
@@ -263,6 +267,71 @@ class GAPPolicyWrapper:
 
         return point_hidden.unsqueeze(0)  # [1, N, num_patches, 1024]
 
+    def _project_point_to_head_camera(self, point_world: np.ndarray, raw_observation: dict) -> tuple[np.ndarray, bool]:
+        camera_obs = raw_observation["observation"]["head_camera"]
+        intrinsic = np.asarray(camera_obs["intrinsic_cv"], dtype=np.float32)
+        extrinsic = np.asarray(camera_obs["extrinsic_cv"], dtype=np.float32)
+        point_world = np.asarray(point_world, dtype=np.float32).reshape(3)
+        point_cam = extrinsic[:, :3] @ point_world + extrinsic[:, 3]
+        if not np.isfinite(point_cam).all() or point_cam[2] <= 1e-6:
+            return np.zeros(2, dtype=np.float32), False
+        uvw = intrinsic @ point_cam
+        uv = uvw[:2] / uvw[2]
+        return uv.astype(np.float32), bool(np.isfinite(uv).all())
+
+    def _eef_region_mask(self, rgb_image: np.ndarray, raw_observation: dict, *, complement: bool) -> torch.Tensor:
+        if raw_observation is None:
+            raise KeyError(
+                f"latent_mode={self.latent_mode!r} requires raw RoboTwin observation with "
+                "head-camera calibration and left/right endpose fields."
+            )
+        try:
+            left = np.asarray(raw_observation["endpose"]["left_endpose"], dtype=np.float32)[:3]
+            right = np.asarray(raw_observation["endpose"]["right_endpose"], dtype=np.float32)[:3]
+        except KeyError as exc:
+            raise KeyError(
+                f"latent_mode={self.latent_mode!r} requires raw_observation['endpose'] with "
+                "'left_endpose' and 'right_endpose'."
+            ) from exc
+
+        image_h, image_w = rgb_image.shape[:2]
+        grid_h = int(self.policy_model.pi3_grid_height)
+        grid_w = int(self.policy_model.pi3_grid_width)
+        yy, xx = np.meshgrid(np.arange(grid_h, dtype=np.float32), np.arange(grid_w, dtype=np.float32), indexing="ij")
+        mask = np.zeros((grid_h, grid_w), dtype=bool)
+
+        for point in (left, right):
+            uv, valid = self._project_point_to_head_camera(point, raw_observation)
+            if not valid:
+                continue
+            if uv[0] < 0 or uv[0] >= image_w or uv[1] < 0 or uv[1] >= image_h:
+                continue
+            token_x = (uv[0] / image_w) * grid_w - 0.5
+            token_y = (uv[1] / image_h) * grid_h - 0.5
+            dist2 = (xx - token_x) ** 2 + (yy - token_y) ** 2
+            mask |= dist2 <= self.eef_mask_radius_tokens ** 2
+
+        if complement:
+            mask = ~mask
+        mask = mask.astype(np.float32).reshape(1, 1, grid_h * grid_w)
+        return torch.from_numpy(mask).to(device=self.device)
+
+    def add_online_latent_masks(self, obs_dict: dict, rgb_image: np.ndarray, raw_observation=None) -> None:
+        if self.latent_mask_key is None:
+            return
+        if self.latent_mode == "pi3_eef_region":
+            obs_dict[self.latent_mask_key] = self._eef_region_mask(
+                rgb_image,
+                raw_observation,
+                complement=False,
+            )
+        elif self.latent_mode == "pi3_non_eef_region":
+            obs_dict[self.latent_mask_key] = self._eef_region_mask(
+                rgb_image,
+                raw_observation,
+                complement=True,
+            )
+
     def get_action(self, rgb_image: np.ndarray, state: np.ndarray, raw_observation=None) -> np.ndarray:
         """
         Get action chunk based on current observation
@@ -297,6 +366,8 @@ class GAPPolicyWrapper:
 
         if pi3_features is not None:
             obs_dict["pi3_features"] = pi3_features
+
+        self.add_online_latent_masks(obs_dict, rgb_image, raw_observation=raw_observation)
 
         if self.use_triadic_token:
             triadic_source = {"agent_pos": state}

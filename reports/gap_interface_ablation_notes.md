@@ -323,6 +323,11 @@ Online eval recomputes DINO/Pi3 features from RoboTwin observations:
 - `extract_pi3_features()` normalizes the RGB image and runs Pi3 encoder,
   decoder, and point decoder.
 - `get_action()` builds the same `obs_dict` keys expected by `GAPPolicy`.
+- For `pi3_eef_region` and `pi3_non_eef_region`, `get_action()` also builds
+  the online current-frame mask from
+  `observation["observation"]["head_camera"]["intrinsic_cv"]`,
+  `observation["observation"]["head_camera"]["extrinsic_cv"]`, and
+  `observation["endpose"]["left_endpose"/"right_endpose"]`.
 
 Online eval is broadly consistent with training in feature type and tensor
 shape, but any future latent-mode change that alters Pi3 token selection or
@@ -775,6 +780,8 @@ Interpretation:
   suggest the signal is not concentrated near projected manipulators.
 - Both are still proxy tests. Because object pose/masks are unavailable, they
   cannot prove true object-hand interaction-region causality.
+- Online eval uses the same projection idea in `deploy_policy.py`, with radius
+  `GAP_EEF_MASK_RADIUS_TOKENS` defaulting to `2.5`.
 
 ## 11. Engineering Scaffold Added
 
@@ -803,6 +810,8 @@ New or updated implementation files:
   modes.
 - `scripts/smoke_test_dataset_optional_fields.py`: synthetic zarr test for
   optional dataset fields and strict missing-mask errors.
+- `scripts/smoke_test_deploy_eef_mask.py`: checks online deploy-time
+  EEF-region mask construction against real HDF5 camera/endpose fields.
 - `scripts/generate_eef_region_masks.py`: writes EEF-projected proxy masks
   (`pi3_eef_region_mask`, `pi3_non_eef_region_mask`) into an existing zarr.
 - `scripts/launch_gap_eef_proxy_queue.sh`: waits for GPU slots and launches
@@ -866,11 +875,13 @@ python -m py_compile \
   scripts/generate_gap_ablation_commands.py \
   scripts/smoke_test_latent_modes.py \
   scripts/smoke_test_future_modes.py \
-  scripts/smoke_test_dataset_optional_fields.py
+  scripts/smoke_test_dataset_optional_fields.py \
+  scripts/smoke_test_deploy_eef_mask.py
 
 python scripts/smoke_test_latent_modes.py
 python scripts/smoke_test_future_modes.py
 python scripts/smoke_test_dataset_optional_fields.py
+python scripts/smoke_test_deploy_eef_mask.py
 
 PYTHON_BIN=/data1/home/zhu_jinxian/worldarena-dataengine-research/.conda/BWM/bin/python \
   bash scripts/run_minimal_interface_smoke.sh
@@ -883,6 +894,8 @@ Results:
 - Synthetic latent-mode smoke tests passed.
 - Synthetic future-target smoke tests passed.
 - Synthetic dataset optional-field smoke tests passed.
+- Deploy-time EEF-region mask smoke test passed on a real
+  `place_dual_shoes/demo_clean` HDF5 frame.
 - The minimal interface smoke runner passed. In the current non-escalated tool
   environment `torch.cuda.is_available()` was false, so the optional one-step
   CUDA training smoke was skipped there.
