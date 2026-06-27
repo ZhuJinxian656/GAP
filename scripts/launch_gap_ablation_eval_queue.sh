@@ -96,4 +96,8 @@ for variant in "${VARIANTS[@]}"; do
   run_eval "$variant"
 done
 
+python scripts/summarize_gap_ablation_results.py \
+  --root "$ROOT_DIR" \
+  --output reports/gap_ablation_result_summary.md
+
 printf '[%s] Eval queue completed.\n' "$(date '+%F %T')"

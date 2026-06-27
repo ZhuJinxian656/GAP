@@ -924,3 +924,10 @@ The six ablation evals are queued through
 ```bash
 tail -f logs/gap_eval_ablation_queue.log
 ```
+
+The eval queue refreshes `reports/gap_ablation_result_summary.md` after all
+queued evals finish. It can also be updated manually:
+
+```bash
+python scripts/summarize_gap_ablation_results.py --root .
+```
