@@ -882,3 +882,20 @@ bash eval.sh place_dual_shoes demo_clean demo_clean_dino_only_seed0 50 200 1 0 1
 bash eval.sh place_dual_shoes demo_clean demo_clean_no_future_seed0 50 200 2 0 10
 bash eval.sh place_dual_shoes demo_clean demo_clean_pi3_pooled_seed0 50 200 3 0 10
 ```
+
+To keep the machine at three concurrent training jobs, the second token-level
+batch is queued through `scripts/launch_gap_ablation_queue.sh` in tmux session
+`gap_ablate_queue`. It waits for `gap_ablate_dino_only`,
+`gap_ablate_no_future`, and `gap_ablate_pi3_pooled` to exit, then launches:
+
+| Session | GPU | Variant | Log | Checkpoint directory |
+| --- | ---: | --- | --- | --- |
+| `gap_ablate_pi3_compressed` | 1 | compressed Pi3 observation plus compressed future target | `logs/gap_ablate_pi3_compressed_gpu1.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_compressed_seed0_50/` |
+| `gap_ablate_pi3_random` | 2 | random Pi3 token subset plus random-token future target | `logs/gap_ablate_pi3_random_gpu2.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_random_seed0_50/` |
+| `gap_ablate_pi3_dropout` | 3 | full Pi3 future target with token dropout in observation | `logs/gap_ablate_pi3_dropout_gpu3.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_dropout_seed0_50/` |
+
+Queue status log:
+
+```bash
+tail -f logs/gap_ablation_queue.log
+```
