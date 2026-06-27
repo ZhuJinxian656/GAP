@@ -1015,7 +1015,7 @@ episode failed (`0/1`), but the purpose was to verify the evaluation stack and
 avoid the earlier `sapien` import failure; success-rate claims still require
 the full eval runs below.
 
-The six ablation evals are queued through
+The eight ablation evals are queued through
 `scripts/launch_gap_ablation_eval_queue.sh` in tmux session
 `gap_eval_ablation_queue`. It polls all pending variants, evaluates whichever
 `200.ckpt` is ready first, uses GPU 4 for 10 rollouts, and refreshes the
@@ -1024,6 +1024,18 @@ ready later variant behind an earlier slow run:
 
 ```bash
 tail -f logs/gap_eval_ablation_queue.log
+```
+
+While the main 200-epoch runs continue, a 100-epoch interim sanity comparison
+is running through `scripts/launch_gap_interim_eval_100.sh` in tmux session
+`gap_interim_eval_100`. It evaluates `vanilla@100` and `dino_only@100` on GPU
+4 for 10 rollouts each. This is only an early signal and should not replace the
+200-epoch comparison.
+
+```bash
+tail -f logs/gap_interim_eval_100.log
+tail -f logs/gap_eval_vanilla_100_gpu4.log
+tail -f logs/gap_eval_dino_only_100_gpu4.log
 ```
 
 The summary can also be updated manually:
