@@ -156,6 +156,27 @@ def fmt_epoch_loss(epoch: Optional[int], loss: Optional[float]) -> str:
     return f"{epoch} / {fmt_float(loss)}"
 
 
+def saved_checkpoints(checkpoint_dir: Path) -> list[int]:
+    if not checkpoint_dir.is_dir():
+        return []
+    epochs = []
+    for path in checkpoint_dir.glob("*.ckpt"):
+        try:
+            epochs.append(int(path.stem))
+        except ValueError:
+            continue
+    return sorted(epochs)
+
+
+def checkpoint_status(checkpoint_dir: Path, target_checkpoint: int) -> str:
+    epochs = saved_checkpoints(checkpoint_dir)
+    if target_checkpoint in epochs:
+        return f"{target_checkpoint} ready"
+    if epochs:
+        return f"{epochs[-1]} saved; {target_checkpoint} pending"
+    return f"{target_checkpoint} pending"
+
+
 def result_file_for(
     root: Path,
     task: str,
@@ -207,7 +228,7 @@ def build_report(args: argparse.Namespace) -> str:
 
     rates: dict[str, Optional[float]] = {}
     for variant in variants:
-        ckpt_path = root / variant.checkpoint_dir / f"{args.checkpoint}.ckpt"
+        ckpt_dir = root / variant.checkpoint_dir
         result_path = result_file_for(
             root=root,
             task=args.task,
@@ -223,7 +244,7 @@ def build_report(args: argparse.Namespace) -> str:
 
         rows.append([
             variant.name,
-            "ready" if ckpt_path.is_file() else "pending",
+            checkpoint_status(ckpt_dir, args.checkpoint),
             fmt_epoch_loss(epoch, loss),
             fmt_float(rate, digits=3),
             str(result_path.relative_to(root)) if result_path.exists() else "pending",
