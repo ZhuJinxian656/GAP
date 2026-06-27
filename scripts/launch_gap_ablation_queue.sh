@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Queue the second GAP interface-ablation batch after the current three-run
-# batch exits. This keeps concurrency at three single-GPU training jobs.
+# Queue the second GAP interface-ablation batch by GPU slot. When one first
+# batch session exits, the next variant for that same GPU starts immediately.
+# This keeps concurrency at three single-GPU training jobs without leaving a
+# faster slot idle.
 
 ROOT_DIR="/data1/home/zhu_jinxian/project/GAP"
 BWM_BIN="/data1/home/zhu_jinxian/worldarena-dataengine-research/.conda/BWM/bin"
@@ -14,21 +16,10 @@ exec >> logs/gap_ablation_queue.log 2>&1
 
 printf '[%s] Queue started. Poll interval: %ss\n' "$(date '+%F %T')" "$POLL_SECONDS"
 
-wait_for_sessions_to_exit() {
-  local sessions=("$@")
-  while true; do
-    local active=()
-    for session in "${sessions[@]}"; do
-      if tmux has-session -t "$session" 2>/dev/null; then
-        active+=("$session")
-      fi
-    done
-
-    if [ "${#active[@]}" -eq 0 ]; then
-      break
-    fi
-
-    printf '[%s] Waiting for sessions: %s\n' "$(date '+%F %T')" "${active[*]}"
+wait_for_session_to_exit() {
+  local session="$1"
+  while tmux has-session -t "$session" 2>/dev/null; do
+    printf '[%s] Waiting for session: %s\n' "$(date '+%F %T')" "$session"
     sleep "$POLL_SECONDS"
   done
 }
@@ -57,39 +48,45 @@ launch_train() {
     "cd '$ROOT_DIR' && env PATH='$BWM_BIN':\$PATH WANDB_MODE=disabled bash train.sh place_dual_shoes demo_clean 50 0 '$gpu' 32 200 100 $* > '$log_file' 2>&1"
 }
 
-wait_for_sessions_to_exit \
-  gap_ablate_dino_only \
-  gap_ablate_no_future \
-  gap_ablate_pi3_pooled
+{
+  wait_for_session_to_exit gap_ablate_dino_only
+  launch_train gap_ablate_pi3_compressed 1 pi3_compressed \
+    latent_mode=pi3_compressed \
+    use_future_loss=true \
+    future_target_mode=pi3_compressed \
+    use_pi3_features=true \
+    policy.use_pi3_features=true \
+    checkpoint_tag=demo_clean_pi3_compressed_seed0 \
+    exp_name=place_dual_shoes_demo_clean_50_pi3_compressed_seed0 \
+    logging.name=place_dual_shoes_demo_clean_50_pi3_compressed_seed0
+} &
 
-launch_train gap_ablate_pi3_compressed 1 pi3_compressed \
-  latent_mode=pi3_compressed \
-  use_future_loss=true \
-  future_target_mode=pi3_compressed \
-  use_pi3_features=true \
-  policy.use_pi3_features=true \
-  checkpoint_tag=demo_clean_pi3_compressed_seed0 \
-  exp_name=place_dual_shoes_demo_clean_50_pi3_compressed_seed0 \
-  logging.name=place_dual_shoes_demo_clean_50_pi3_compressed_seed0
+{
+  wait_for_session_to_exit gap_ablate_no_future
+  launch_train gap_ablate_pi3_random 2 pi3_random \
+    latent_mode=pi3_random_tokens \
+    use_future_loss=true \
+    future_target_mode=pi3_random_tokens \
+    use_pi3_features=true \
+    policy.use_pi3_features=true \
+    checkpoint_tag=demo_clean_pi3_random_seed0 \
+    exp_name=place_dual_shoes_demo_clean_50_pi3_random_seed0 \
+    logging.name=place_dual_shoes_demo_clean_50_pi3_random_seed0
+} &
 
-launch_train gap_ablate_pi3_random 2 pi3_random \
-  latent_mode=pi3_random_tokens \
-  use_future_loss=true \
-  future_target_mode=pi3_random_tokens \
-  use_pi3_features=true \
-  policy.use_pi3_features=true \
-  checkpoint_tag=demo_clean_pi3_random_seed0 \
-  exp_name=place_dual_shoes_demo_clean_50_pi3_random_seed0 \
-  logging.name=place_dual_shoes_demo_clean_50_pi3_random_seed0
+{
+  wait_for_session_to_exit gap_ablate_pi3_pooled
+  launch_train gap_ablate_pi3_dropout 3 pi3_dropout \
+    latent_mode=pi3_token_dropout \
+    use_future_loss=true \
+    future_target_mode=pi3_full \
+    use_pi3_features=true \
+    policy.use_pi3_features=true \
+    checkpoint_tag=demo_clean_pi3_dropout_seed0 \
+    exp_name=place_dual_shoes_demo_clean_50_pi3_dropout_seed0 \
+    logging.name=place_dual_shoes_demo_clean_50_pi3_dropout_seed0
+} &
 
-launch_train gap_ablate_pi3_dropout 3 pi3_dropout \
-  latent_mode=pi3_token_dropout \
-  use_future_loss=true \
-  future_target_mode=pi3_full \
-  use_pi3_features=true \
-  policy.use_pi3_features=true \
-  checkpoint_tag=demo_clean_pi3_dropout_seed0 \
-  exp_name=place_dual_shoes_demo_clean_50_pi3_dropout_seed0 \
-  logging.name=place_dual_shoes_demo_clean_50_pi3_dropout_seed0
+wait
 
 printf '[%s] Second ablation batch launched.\n' "$(date '+%F %T')"

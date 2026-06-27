@@ -885,8 +885,9 @@ bash eval.sh place_dual_shoes demo_clean demo_clean_pi3_pooled_seed0 50 200 3 0 
 
 To keep the machine at three concurrent training jobs, the second token-level
 batch is queued through `scripts/launch_gap_ablation_queue.sh` in tmux session
-`gap_ablate_queue`. It waits for `gap_ablate_dino_only`,
-`gap_ablate_no_future`, and `gap_ablate_pi3_pooled` to exit, then launches:
+`gap_ablate_queue`. The queue is GPU-slot based: when one first-batch session
+exits, the next variant for that same GPU starts immediately instead of
+waiting for all first-batch runs to finish.
 
 | Session | GPU | Variant | Log | Checkpoint directory |
 | --- | ---: | --- | --- | --- |
