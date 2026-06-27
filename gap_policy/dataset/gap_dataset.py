@@ -14,6 +14,7 @@ from typing import Dict
 import torch
 import numpy as np
 import copy
+import zarr
 from gap_policy.common.pytorch_util import dict_apply
 from gap_policy.common.replay_buffer import ReplayBuffer
 from gap_policy.common.sampler import (
@@ -26,6 +27,7 @@ from gap_policy.model.common.normalizer import (
     SingleFieldLinearNormalizer,
 )
 from gap_policy.dataset.base_dataset import BaseDataset
+from gap_policy.latent_modes import mask_key_for_mode
 
 
 class GAPDataset(BaseDataset):
@@ -48,11 +50,17 @@ class GAPDataset(BaseDataset):
         model_3d="pi3",
         use_triadic_token=False,
         triadic_mode="disabled",
+        latent_mode="pi3_full",
+        use_future_loss=True,
+        future_target_mode="pi3_full",
     ):
         super().__init__()
         self.task_name = task_name
         self.use_pi3_features = use_pi3_features
         self.use_triadic_token = bool(use_triadic_token) and triadic_mode != "disabled"
+        self.latent_mode = latent_mode
+        self.use_future_loss = bool(use_future_loss)
+        self.future_target_mode = future_target_mode
 
         # Make path relative to this file
         current_file_path = os.path.abspath(__file__)
@@ -65,6 +73,45 @@ class GAPDataset(BaseDataset):
             keys.append(f"{model_3d}_features")
         if self.use_triadic_token:
             keys.append("triadic_state")
+        self.mask_keys = sorted(set(
+            key
+            for key in (
+                mask_key_for_mode(latent_mode),
+                mask_key_for_mode(future_target_mode),
+            )
+            if key is not None
+        ))
+        keys.extend(self.mask_keys)
+        self.use_interaction_state = future_target_mode == "interaction_state"
+        if self.use_interaction_state:
+            keys.append("future_interaction_state")
+
+        zarr_group = zarr.open(zarr_path, mode="r")
+        available_keys = set(zarr_group["data"].array_keys())
+        missing_keys = [key for key in keys if key not in available_keys]
+        if missing_keys:
+            reasons = []
+            for key in missing_keys:
+                if key in self.mask_keys:
+                    reasons.append(
+                        f"{key!r} is required by latent_mode={latent_mode!r} "
+                        f"or future_target_mode={future_target_mode!r}."
+                    )
+                elif key == "future_interaction_state":
+                    reasons.append(
+                        "'future_interaction_state' is required by "
+                        "future_target_mode='interaction_state'."
+                    )
+                else:
+                    reasons.append(f"{key!r} is required by the GAP dataset configuration.")
+            raise KeyError(
+                "Requested zarr dataset is missing required arrays: "
+                + ", ".join(missing_keys)
+                + "\nAvailable data arrays: "
+                + ", ".join(sorted(available_keys))
+                + "\n"
+                + "\n".join(reasons)
+            )
 
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
@@ -111,6 +158,10 @@ class GAPDataset(BaseDataset):
         print(f"  Action shape: {self.replay_buffer['action'].shape}")
         if self.use_triadic_token:
             print(f"  Triadic state shape: {self.replay_buffer['triadic_state'].shape}")
+        for key in self.mask_keys:
+            print(f"  Mask {key} shape: {self.replay_buffer[key].shape}")
+        if self.use_interaction_state:
+            print(f"  Future interaction state shape: {self.replay_buffer['future_interaction_state'].shape}")
 
     def get_validation_dataset(self):
         """Create validation dataset with same parameters"""
@@ -144,6 +195,8 @@ class GAPDataset(BaseDataset):
         normalizer["dinov3_features"] = self._get_identity_normalizer()
         if self.use_pi3_features:
             normalizer["pi3_features"] = self._get_identity_normalizer()
+        for key in self.mask_keys:
+            normalizer[key] = self._get_identity_normalizer()
 
         return normalizer
 
@@ -204,6 +257,16 @@ class GAPDataset(BaseDataset):
             triadic_state = sample["triadic_state"].astype(np.float32)
             obs_dict["triadic_state"] = triadic_state[0]
 
+        for key in self.mask_keys:
+            mask = sample[key].astype(np.float32)
+            obs_dict[key] = mask[0]
+            data_key = f"future_{key}"
+            # The same zarr mask array is indexed at the future timestep for
+            # future-target masking. It is not a separate stored zarr key.
+            sample_future = mask[-1]
+            # data is created below; temporarily stash in obs_dict namespace.
+            obs_dict[data_key] = sample_future
+
         # Add Pi3 features if available (current frame for encoding)
         if self.use_pi3_features and "pi3_features" in sample:
             # Pi3 features [T, N_views, num_patches, 1024] - we only use first frame for observation
@@ -216,12 +279,19 @@ class GAPDataset(BaseDataset):
             "action": action,  # [T, 14] - full action sequence
         }
 
+        for key in self.mask_keys:
+            data[f"future_{key}"] = obs_dict.pop(f"future_{key}")
+
         # Add future pi3 features (last frame of action chunk) for point map prediction
-        if self.use_pi3_features and "pi3_features" in sample:
+        if self.use_pi3_features and self.use_future_loss and "pi3_features" in sample:
             # Get the last frame's pi3 features as ground truth for prediction
             T = pi3_features.shape[0]
             future_pi3 = pi3_features[-1]  # Take last frame: [N_views, num_patches, 1024]
             data["future_pi3_features"] = future_pi3
+
+        if self.use_interaction_state and "future_interaction_state" in sample:
+            future_interaction = sample["future_interaction_state"].astype(np.float32)
+            data["future_interaction_state"] = future_interaction[-1]
 
         return data
 

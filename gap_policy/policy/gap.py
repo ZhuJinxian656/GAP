@@ -16,7 +16,7 @@ Feature extraction mode:
 - Pre-extracted features from process_data.py are used directly
 - No runtime feature extraction (much faster training and inference)
 """
-from typing import Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,6 +31,23 @@ from gap_policy.policy.base_policy import BasePolicy
 from gap_policy.common.pytorch_util import dict_apply
 from gap_policy.common.model_util import print_params
 from gap_policy.triadic import infer_triadic_dim
+from gap_policy.latent_modes import (
+    FUTURE_TARGET_MODES,
+    PI3_LATENT_MODES,
+    LearnedTokenCompressor,
+    apply_dense_token_mask,
+    apply_token_dropout,
+    flatten_pi3_tokens,
+    make_random_indices,
+    mask_key_for_mode,
+    mode_requires_mask,
+    mode_requires_pi3,
+    normalize_mode,
+    parse_pair,
+    pool_grid_tokens,
+    pool_pi3_grid,
+    select_token_indices,
+)
 
 
 # ============================================================================
@@ -344,6 +361,16 @@ class GAPPolicy(BasePolicy):
         pi3_feature_dim=1024,     # Pi3 point_hidden feature dimension
         pi3_num_views=1,          # Number of camera views for Pi3 (head, left_wrist, right_wrist)
         pi3_embed_dim=1024,       # Embedding dimension for pi3 features (match with vision_feat_dim)
+        latent_mode="pi3_full",
+        latent=None,
+        use_future_loss=True,
+        future_target_mode="pi3_full",
+        future_loss_weight=0.1,
+        future=None,
+        dinov3_grid_height=15,
+        dinov3_grid_width=20,
+        pi3_grid_height=17,
+        pi3_grid_width=23,
         # State encoder config
         state_dim=14,
         state_embed_dim=1024,     # Must match feature dimensions
@@ -383,6 +410,10 @@ class GAPPolicy(BasePolicy):
         self.dinov3_feature_dim = dinov3_feature_dim
         self.dinov3_num_views = dinov3_num_views
         vision_feat_dim = dinov3_feature_dim  # 1024 for vitl16
+        self.dinov3_grid_height = int(dinov3_grid_height)
+        self.dinov3_grid_width = int(dinov3_grid_width)
+        self.pi3_grid_height = int(pi3_grid_height)
+        self.pi3_grid_width = int(pi3_grid_width)
 
         # State encoder (agent_pos)
         self.state_encoder = nn.Linear(state_dim, state_embed_dim)
@@ -408,6 +439,58 @@ class GAPPolicy(BasePolicy):
 
         # Pi3 feature encoder (if using pre-extracted features)
         self.use_pi3_features = use_pi3_features
+        self.latent_mode = normalize_mode(latent_mode, PI3_LATENT_MODES, field_name="latent_mode")
+        self.use_pi3_obs_tokens = bool(use_pi3_features) and mode_requires_pi3(self.latent_mode)
+        self.use_future_loss = bool(use_future_loss)
+        self.future_target_mode = normalize_mode(
+            future_target_mode,
+            FUTURE_TARGET_MODES,
+            field_name="future_target_mode",
+        )
+        self.future_loss_weight = float(future_loss_weight)
+        self.predict_future_pi3 = (
+            bool(use_pi3_features)
+            and self.use_future_loss
+            and mode_requires_pi3(self.future_target_mode)
+        )
+        self.predict_interaction_state = (
+            self.use_future_loss and self.future_target_mode == "interaction_state"
+        )
+        self.latent_cfg = self._to_plain_dict(latent)
+        self.future_cfg = self._to_plain_dict(future)
+        self.latent_pool_grid = parse_pair(self.latent_cfg.get("pi3_pool_grid"), (4, 4))
+        self.future_pool_grid = parse_pair(self.future_cfg.get("pi3_pool_grid"), self.latent_pool_grid)
+        self.latent_num_compressed_tokens = int(self.latent_cfg.get("pi3_num_compressed_tokens", 16))
+        self.future_num_compressed_tokens = int(self.future_cfg.get("pi3_num_compressed_tokens", 16))
+        self.pi3_random_num_tokens = int(self.latent_cfg.get("pi3_random_num_tokens", 64))
+        self.pi3_random_seed = int(self.latent_cfg.get("pi3_random_seed", 0))
+        self.pi3_token_dropout_rate = float(self.latent_cfg.get("pi3_token_dropout_rate", 0.0))
+        self.require_token_mask = bool(self.latent_cfg.get("require_token_mask", True))
+        self.pi3_total_tokens = self.pi3_grid_height * self.pi3_grid_width
+        if self.latent_mode == "pi3_random_tokens" or self.future_target_mode == "pi3_random_tokens":
+            self.register_buffer(
+                "pi3_random_indices",
+                make_random_indices(self.pi3_total_tokens, self.pi3_random_num_tokens, self.pi3_random_seed),
+                persistent=False,
+            )
+        else:
+            self.register_buffer("pi3_random_indices", torch.empty(0, dtype=torch.long), persistent=False)
+        if self.latent_mode == "pi3_compressed":
+            self.pi3_latent_compressor = LearnedTokenCompressor(vision_feat_dim, self.latent_num_compressed_tokens)
+            self.pi3_latent_compressed_pos_embed = nn.Parameter(
+                torch.randn(self.latent_num_compressed_tokens, vision_feat_dim) * 0.02
+            )
+        if self.future_target_mode == "pi3_compressed":
+            self.pi3_future_target_compressor = LearnedTokenCompressor(
+                vision_feat_dim,
+                self.future_num_compressed_tokens,
+            )
+            self.pi3_future_query_embed = nn.Parameter(
+                torch.randn(self.future_num_compressed_tokens, vision_feat_dim) * 0.02
+            )
+            self.pi3_future_query_pos_embed = nn.Parameter(
+                torch.randn(self.future_num_compressed_tokens, vision_feat_dim) * 0.02
+            )
         if use_pi3_features:
             self.pi3_num_views = pi3_num_views
             self.pi3_feature_dim = pi3_feature_dim
@@ -486,34 +569,26 @@ class GAPPolicy(BasePolicy):
         # Output projection for actions
         self.action_head = nn.Linear(self.feature_dim, action_dim)
 
-        # ========== Pi3 Feature Prediction (Point Map Prediction - PMP) ==========
-        # Add pi3 feature queries for predicting future frame's pi3 features
-        # if use_pi3_features:
-            # Pi3 spatial query structure: 17x23 grid (matching pi3 patch grid)
-        self.pi3_query_height = 17
-        self.pi3_query_width = 23
-        self.num_pi3_queries = self.pi3_query_height * self.pi3_query_width  # 17*23 = 391 queries
+        # ========== Future Pi3 Feature Prediction ==========
+        self.pi3_query_height = self.pi3_grid_height
+        self.pi3_query_width = self.pi3_grid_width
+        self.num_pi3_queries = self._mode_token_count(self.future_target_mode, for_future=True)
 
-        # Pi3 feature query embedding (learned queries in 2D structure)
-        # Shape: [height, width, feature_dim]
-        self.pi3_query_embed = nn.Parameter(
-            torch.randn(self.pi3_query_height, self.pi3_query_width, self.feature_dim)
-        )
+        if self.predict_future_pi3:
+            # Keep these parameter names/shapes for vanilla checkpoint compatibility.
+            self.pi3_query_embed = nn.Parameter(
+                torch.randn(self.pi3_query_height, self.pi3_query_width, self.feature_dim)
+            )
+            self.pi3_query_pos_embed = nn.Parameter(
+                torch.randn(self.pi3_query_height, self.pi3_query_width, self.feature_dim)
+            )
+            self.pi3_feature_head = nn.Linear(self.feature_dim, pi3_num_views * pi3_feature_dim)
 
-        # Pi3 query position embedding (learnable, different for each query)
-        # Shape: [height, width, feature_dim]
-        self.pi3_query_pos_embed = nn.Parameter(
-            torch.randn(self.pi3_query_height, self.pi3_query_width, self.feature_dim)
-        )
-
-        # Pi3 feature head (output projection)
-        # Each query predicts one patch's features for all views
-        # Output: [height*width, num_views * pi3_feature_dim]
-        self.pi3_feature_head = nn.Linear(self.feature_dim, pi3_num_views * pi3_feature_dim)
-
-        cprint(f"  [PMP] Pi3 feature prediction enabled", "yellow")
-        cprint(f"  [PMP] Pi3 query grid: {self.pi3_query_height}x{self.pi3_query_width} = {self.num_pi3_queries} queries", "yellow")
-        cprint(f"  [PMP] Pi3 output per query: {pi3_num_views} views * {pi3_feature_dim} dim", "yellow")
+            cprint(f"  [Future Pi3] prediction enabled ({self.future_target_mode})", "yellow")
+            cprint(f"  [Future Pi3] queries: {self.num_pi3_queries}", "yellow")
+            cprint(f"  [Future Pi3] output per query: {pi3_num_views} views * {pi3_feature_dim} dim", "yellow")
+        else:
+            cprint(f"  [Future Pi3] prediction disabled ({self.future_target_mode})", "yellow")
 
         # Noise scheduler
         self.noise_scheduler = noise_scheduler
@@ -552,6 +627,206 @@ class GAPPolicy(BasePolicy):
         cprint(f"  [Diffusion Timestep] Concat as token to memory (ACT-DP-TP 'cat' mode)", "green")
 
         print_params(self)
+
+    @staticmethod
+    def _to_plain_dict(config: Optional[Any]) -> Dict[str, Any]:
+        if config is None:
+            return {}
+        if isinstance(config, Mapping):
+            return dict(config)
+        if hasattr(config, "items"):
+            return dict(config.items())
+        data = {}
+        for key in dir(config):
+            if key.startswith("_"):
+                continue
+            try:
+                value = getattr(config, key)
+            except Exception:
+                continue
+            if not callable(value):
+                data[key] = value
+        return data
+
+    def _mode_token_count(self, mode: str, *, for_future: bool) -> int:
+        if mode in ("none", "dino_only", "pi3_none", "interaction_state"):
+            return 0
+        if mode == "pi3_pooled":
+            grid = self.future_pool_grid if for_future else self.latent_pool_grid
+            return int(grid[0] * grid[1])
+        if mode == "pi3_compressed":
+            return self.future_num_compressed_tokens if for_future else self.latent_num_compressed_tokens
+        if mode == "pi3_random_tokens":
+            return self.pi3_random_num_tokens
+        return self.pi3_total_tokens
+
+    def _full_pi3_pos(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        return self.get_2d_sinusoidal_positional_encoding(
+            height=self.pi3_grid_height,
+            width=self.pi3_grid_width,
+            embedding_dim=self.feature_dim,
+            device=device,
+        ).unsqueeze(0).expand(batch_size, -1, -1)
+
+    def _dino_pos(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        return self.get_2d_sinusoidal_positional_encoding(
+            height=self.dinov3_grid_height,
+            width=self.dinov3_grid_width,
+            embedding_dim=self.feature_dim,
+            device=device,
+        ).unsqueeze(0).expand(batch_size, -1, -1)
+
+    def _mask_for_mode(self, obs_dict: Dict[str, torch.Tensor], mode: str, *, future: bool = False) -> torch.Tensor:
+        key = mask_key_for_mode(mode)
+        if key is None:
+            raise ValueError(f"Mode {mode!r} does not use a token mask.")
+        lookup_key = f"future_{key}" if future else key
+        if lookup_key not in obs_dict:
+            raise KeyError(
+                f"{mode} requires token mask {lookup_key!r}, but it is missing. "
+                "Run preprocessing with real object/hand masks or use a non-mask latent mode."
+            )
+        return obs_dict[lookup_key]
+
+    def _apply_pi3_latent_mode(
+        self,
+        pi3_features: torch.Tensor,
+        obs_dict: Dict[str, torch.Tensor],
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        mode = self.latent_mode
+        B = pi3_features.shape[0]
+        device = pi3_features.device
+        if mode in ("dino_only", "pi3_none"):
+            return None, None
+        if mode == "pi3_full":
+            return flatten_pi3_tokens(pi3_features), self._full_pi3_pos(B, device)
+        if mode == "pi3_token_dropout":
+            dropped = apply_token_dropout(pi3_features, self.pi3_token_dropout_rate, self.training)
+            return flatten_pi3_tokens(dropped), self._full_pi3_pos(B, device)
+        if mode == "pi3_pooled":
+            pooled = pool_pi3_grid(
+                pi3_features,
+                (self.pi3_grid_height, self.pi3_grid_width),
+                self.latent_pool_grid,
+            )
+            pos = self.get_2d_sinusoidal_positional_encoding(
+                height=self.latent_pool_grid[0],
+                width=self.latent_pool_grid[1],
+                embedding_dim=self.feature_dim,
+                device=device,
+            ).unsqueeze(0).expand(B, -1, -1)
+            return flatten_pi3_tokens(pooled), pos
+        if mode == "pi3_random_tokens":
+            selected = select_token_indices(pi3_features, self.pi3_random_indices)
+            full_pos = self._full_pi3_pos(B, device)
+            pos = full_pos.index_select(dim=1, index=self.pi3_random_indices.to(device))
+            return flatten_pi3_tokens(selected), pos
+        if mode == "pi3_compressed":
+            compressed = self.pi3_latent_compressor(pi3_features)
+            pos = self.pi3_latent_compressed_pos_embed.unsqueeze(0).expand(B, -1, -1)
+            return compressed, pos
+        if mode_requires_mask(mode):
+            mask = self._mask_for_mode(obs_dict, mode)
+            masked = apply_dense_token_mask(pi3_features, mask, mode=mode)
+            return flatten_pi3_tokens(masked), self._full_pi3_pos(B, device)
+        raise ValueError(f"Unsupported latent_mode={mode!r}")
+
+    def _future_queries(self, batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        mode = self.future_target_mode
+        full_query = self.pi3_query_embed.reshape(-1, self.feature_dim)
+        full_pos = self.pi3_query_pos_embed.reshape(-1, self.feature_dim)
+        if mode in ("pi3_full", "pi3_token_dropout", "pi3_object_hand", "pi3_background"):
+            query = full_query
+            pos = full_pos
+        elif mode == "pi3_pooled":
+            query = pool_grid_tokens(full_query, (self.pi3_grid_height, self.pi3_grid_width), self.future_pool_grid)
+            pos = pool_grid_tokens(full_pos, (self.pi3_grid_height, self.pi3_grid_width), self.future_pool_grid)
+        elif mode == "pi3_random_tokens":
+            indices = self.pi3_random_indices.to(device)
+            query = full_query.index_select(dim=0, index=indices)
+            pos = full_pos.index_select(dim=0, index=indices)
+        elif mode == "pi3_compressed":
+            query = self.pi3_future_query_embed
+            pos = self.pi3_future_query_pos_embed
+        else:
+            raise ValueError(f"Unsupported future_target_mode={mode!r} for Pi3 prediction.")
+        return (
+            query.unsqueeze(0).expand(batch_size, -1, -1),
+            pos.unsqueeze(0).expand(batch_size, -1, -1),
+        )
+
+    def _prepare_future_pi3_target(
+        self,
+        future_pi3: torch.Tensor,
+        batch: Dict[str, Any],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        mode = self.future_target_mode
+        if mode == "pi3_full":
+            target = future_pi3
+            mask = None
+        elif mode == "pi3_token_dropout":
+            target = future_pi3
+            mask = None
+        elif mode == "pi3_pooled":
+            target = pool_pi3_grid(
+                future_pi3,
+                (self.pi3_grid_height, self.pi3_grid_width),
+                self.future_pool_grid,
+            )
+            mask = None
+        elif mode == "pi3_random_tokens":
+            target = select_token_indices(future_pi3, self.pi3_random_indices)
+            mask = None
+        elif mode == "pi3_compressed":
+            # Keep the target projection fixed within the loss; otherwise the
+            # target branch can move toward the prediction instead of defining
+            # a stable compressed future-latent objective.
+            with torch.no_grad():
+                target = self.pi3_future_target_compressor(future_pi3)
+            return target, None
+        elif mode_requires_mask(mode):
+            mask = self._mask_for_mode(batch, mode, future=True)
+            target = apply_dense_token_mask(future_pi3, mask, mode=mode)
+            mask = mask
+        else:
+            raise ValueError(f"Unsupported future_target_mode={mode!r} for future Pi3 target.")
+
+        if target.ndim == 4:
+            B, N_views, num_patches, pi3_dim = target.shape
+            target = target.permute(0, 2, 1, 3).reshape(B, num_patches, N_views * pi3_dim)
+        return target, mask
+
+    def _future_loss(
+        self,
+        pi3_pred: torch.Tensor,
+        future_target: torch.Tensor,
+        future_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if future_mask is None:
+            return F.mse_loss(pi3_pred, future_target, reduction="mean")
+        if future_mask.ndim == 3:
+            # [B, V, N] -> [B, N, V]
+            mask = future_mask.to(device=pi3_pred.device, dtype=pi3_pred.dtype).permute(0, 2, 1)
+            loss_feature_dim = pi3_pred.shape[-1]
+            if loss_feature_dim % mask.shape[-1] != 0:
+                raise ValueError(
+                    f"Future prediction feature dim {loss_feature_dim} is not divisible by "
+                    f"mask view count {mask.shape[-1]}."
+                )
+            per_view_dim = loss_feature_dim // mask.shape[-1]
+            mask = mask.unsqueeze(-1).expand(-1, -1, -1, per_view_dim)
+            mask = mask.reshape(mask.shape[0], mask.shape[1], loss_feature_dim)
+        else:
+            mask = future_mask.to(device=pi3_pred.device, dtype=pi3_pred.dtype).unsqueeze(-1)
+        if mask.shape[1] != pi3_pred.shape[1]:
+            raise ValueError(
+                f"Future mask token count {mask.shape[1]} does not match prediction token count {pi3_pred.shape[1]}."
+            )
+        loss = (pi3_pred - future_target).pow(2)
+        if mask.shape[-1] == 1 and loss.shape[-1] != 1:
+            mask = mask.expand(-1, -1, loss.shape[-1])
+        denom = mask.sum().clamp_min(1.0)
+        return (loss * mask).sum() / denom
 
     def get_sinusoidal_timestep_embedding(self, timesteps, embedding_dim=256):
         """
@@ -677,11 +952,9 @@ class GAPPolicy(BasePolicy):
         pi3_encoded = None
         if self.use_pi3_features and 'pi3_features' in obs_dict:
             pi3_features = obs_dict['pi3_features']  # [B, N_views, num_patches, 1024]
-            N_pi3_views, N_pi3_patches, _ = pi3_features.shape[1:]
-            # Flatten all views: [B, N_views, num_patches, 1024] -> [B, N_views*num_patches, 1024]
-            pi3_flat = pi3_features.reshape(B, N_pi3_views * N_pi3_patches, -1)
-            # Project features
-            pi3_encoded = pi3_flat  # [B, N_pi3_views*num_patches, D]
+            pi3_encoded, pi3_pos = self._apply_pi3_latent_mode(pi3_features, obs_dict)
+        else:
+            pi3_pos = None
 
         # 3. Encode state
         state_features = self.state_encoder(agent_pos)  # [B, D]
@@ -715,12 +988,7 @@ class GAPPolicy(BasePolicy):
         # State position
         state_pos = self.state_pos_embed.weight.unsqueeze(0).expand(B, -1, -1)  # [B, 1, D]
 
-        dinov3_pos = self.get_2d_sinusoidal_positional_encoding(
-            height=15,
-            width=20,
-            embedding_dim=self.feature_dim,
-            device=device
-        ).unsqueeze(0).expand(B, -1, -1)  # [B, N_dinov3_patches*N_dinov3_views, D]
+        dinov3_pos = self._dino_pos(B, device)  # [B, N_dinov3_patches*N_dinov3_views, D]
         pos_list = [cls_pos, state_pos]
         if self.use_triadic_token:
             triadic_pos = self.triadic_pos_embed.weight.unsqueeze(0).expand(B, -1, -1)  # [B, 1, D]
@@ -729,12 +997,6 @@ class GAPPolicy(BasePolicy):
         encoder_pos = torch.cat(pos_list, dim=1)  # [B, N_tokens, D]
 
         if pi3_encoded is not None:
-            pi3_pos = self.get_2d_sinusoidal_positional_encoding(
-                height=17,
-                width=23,
-                embedding_dim=self.feature_dim,
-                device=device
-            ).unsqueeze(0).expand(B, -1, -1)  # [B, N_pi3_patches*N_pi3_views, D]
             encoder_pos = torch.cat([encoder_pos, pi3_pos], dim=1)  # [B, N_tokens, D]
         
         # 7. Pass through transformer encoder
@@ -775,12 +1037,9 @@ class GAPPolicy(BasePolicy):
         # 1. Embed noised actions (no position added yet)
         action_tgt = self.action_embed(noised_actions)  # [B, horizon, D]
 
-        # 1b. Add pi3 feature queries (if enabled)
-        if self.use_pi3_features :
-            # Flatten 2D pi3 queries: [height, width, D] -> [height*width, D]
-            pi3_tgt_flat = self.pi3_query_embed.reshape(-1, self.feature_dim)  # [num_pi3_queries, D]
-            # Expand for batch
-            pi3_tgt = pi3_tgt_flat.unsqueeze(0).expand(B, -1, -1)  # [B, num_pi3_queries, D]
+        # 1b. Add future Pi3 queries (if enabled)
+        if self.predict_future_pi3:
+            pi3_tgt, _ = self._future_queries(B, device)
             # Concatenate action queries and pi3 queries
             tgt = torch.cat([action_tgt, pi3_tgt], dim=1)  # [B, horizon+num_pi3_queries, D]
         else:
@@ -801,12 +1060,8 @@ class GAPPolicy(BasePolicy):
         # 3. Get learnable query position embeddings
         action_query_pos = self.action_pos_embed.weight.unsqueeze(0).expand(B, -1, -1)  # [B, horizon, D]
 
-        if self.use_pi3_features :
-            # Use learned position embeddings for pi3 queries (different for each query)
-            # Flatten 2D position embeddings: [height, width, D] -> [height*width, D]
-            pi3_query_pos_flat = self.pi3_query_pos_embed.reshape(-1, self.feature_dim)  # [num_pi3_queries, D]
-            # Expand for batch
-            pi3_query_pos = pi3_query_pos_flat.unsqueeze(0).expand(B, -1, -1)  # [B, num_pi3_queries, D]
+        if self.predict_future_pi3:
+            _, pi3_query_pos = self._future_queries(B, device)
             query_pos = torch.cat([action_query_pos, pi3_query_pos], dim=1)  # [B, horizon+num_pi3_queries, D]
         else:
             query_pos = action_query_pos
@@ -824,7 +1079,7 @@ class GAPPolicy(BasePolicy):
         action_decoded = decoded[:, :self.horizon, :]  # [B, horizon, D]
         model_output = self.action_head(action_decoded)  # [B, horizon, action_dim]
 
-        if self.use_pi3_features :
+        if self.predict_future_pi3:
             pi3_decoded = decoded[:, self.horizon:, :]  # [B, num_pi3_queries, D]
             # Each query predicts features for all views: [B, num_pi3_queries, num_views*pi3_dim]
             pi3_output = self.pi3_feature_head(pi3_decoded)  # [B, height*width, num_views*pi3_dim]
@@ -879,7 +1134,7 @@ class GAPPolicy(BasePolicy):
                 memory_pos=memory_pos,
             )
 
-            if self.use_pi3_features :
+            if self.predict_future_pi3:
                 model_output, pi3_features_pred = forward_output
             else:
                 model_output = forward_output
@@ -891,7 +1146,7 @@ class GAPPolicy(BasePolicy):
                 actions,
             ).prev_sample
 
-        if self.use_pi3_features :
+        if self.predict_future_pi3:
             return actions, pi3_features_pred
         else:
             return actions
@@ -922,7 +1177,7 @@ class GAPPolicy(BasePolicy):
             **self.kwargs,
         )
 
-        if self.use_pi3_features :
+        if self.predict_future_pi3:
             naction_pred, pi3_pred = sample_output
         else:
             naction_pred = sample_output
@@ -938,7 +1193,7 @@ class GAPPolicy(BasePolicy):
             "action_pred": action_pred,
         }
 
-        if self.use_pi3_features :
+        if self.predict_future_pi3:
             result["pi3_features_pred"] = pi3_pred
 
         return result
@@ -994,7 +1249,7 @@ class GAPPolicy(BasePolicy):
             memory_pos=memory_pos,
         )
 
-        if self.use_pi3_features :
+        if self.predict_future_pi3:
             pred, pi3_pred = forward_output
         else:
             pred = forward_output
@@ -1031,32 +1286,34 @@ class GAPPolicy(BasePolicy):
             "action_loss": action_loss.item(),
         }
 
-        # Pi3 feature prediction loss (if enabled)
-        if self.use_pi3_features and "future_pi3_features" in batch:
-            # Get ground truth future pi3 features (last frame of action chunk)
+        # Future latent prediction loss (if enabled)
+        if self.predict_future_pi3:
+            if "future_pi3_features" not in batch:
+                raise KeyError(
+                    "future Pi3 loss is enabled, but batch does not contain "
+                    "'future_pi3_features'. Set use_future_loss=false or provide Pi3 features."
+                )
             future_pi3 = batch["future_pi3_features"]  # [B, N_views, num_patches, pi3_dim]
+            future_target, future_mask = self._prepare_future_pi3_target(future_pi3, batch)
+            future_loss = self._future_loss(pi3_pred, future_target, future_mask)
 
-            # Reshape ground truth to match prediction shape
-            # pred: [B, height*width, num_views*pi3_dim]
-            # GT: [B, N_views, num_patches, pi3_dim] -> [B, num_patches, N_views*pi3_dim]
-            B_pi3, N_views, num_patches, pi3_dim = future_pi3.shape
+            loss_dict["future_loss"] = future_loss.item()
+            loss_dict["pi3_loss"] = future_loss.item()  # backward-compatible metric name
+            loss_dict["future_loss_mode"] = self.future_target_mode
 
-            # Transpose and reshape: [B, N_views, num_patches, pi3_dim] -> [B, num_patches, N_views, pi3_dim]
-            future_pi3_transposed = future_pi3.permute(0, 2, 1, 3)  # [B, num_patches, N_views, pi3_dim]
-            # Flatten last two dims: [B, num_patches, N_views*pi3_dim]
-            future_pi3_flat = future_pi3_transposed.reshape(B_pi3, num_patches, N_views * pi3_dim)
-
-            # Compute pi3 feature loss
-            pi3_loss = F.mse_loss(pi3_pred, future_pi3_flat, reduction="mean")
-
-            loss_dict["pi3_loss"] = pi3_loss.item()
-
-            # Combined loss with weighting
-            pi3_loss_weight = 0.1  # Weight for pi3 loss (auxiliary task)
-            loss = action_loss + pi3_loss_weight * pi3_loss
+            loss = action_loss + self.future_loss_weight * future_loss
             loss_dict["total_loss"] = loss.item()
+        elif self.predict_interaction_state:
+            raise NotImplementedError(
+                "future_target_mode='interaction_state' requires dataset-provided "
+                "future_interaction_state and a prediction head; current public data "
+                "does not expose object pose/keypoints needed for this mode."
+            )
         else:
             loss = action_loss
+            loss_dict["future_loss"] = 0.0
+            loss_dict["future_loss_mode"] = "none"
+            loss_dict["total_loss"] = loss.item()
 
         return loss, loss_dict
 

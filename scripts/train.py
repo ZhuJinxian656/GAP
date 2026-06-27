@@ -88,6 +88,9 @@ def main(cfg: OmegaConf):
         model_3d=model_3d,
         use_triadic_token=cfg.policy.get("use_triadic_token", False),
         triadic_mode=cfg.policy.get("triadic_mode", "disabled"),
+        latent_mode=cfg.get("latent_mode", cfg.policy.get("latent_mode", "pi3_full")),
+        use_future_loss=cfg.get("use_future_loss", cfg.policy.get("use_future_loss", True)),
+        future_target_mode=cfg.get("future_target_mode", cfg.policy.get("future_target_mode", "pi3_full")),
     )
 
     # Get normalizer

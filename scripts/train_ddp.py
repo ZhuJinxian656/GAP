@@ -14,6 +14,7 @@ if __name__ == "__main__":
     os.chdir(ROOT_DIR)
 
 import copy
+import numbers
 import os
 import pathlib
 import random
@@ -139,6 +140,9 @@ def main(cfg: OmegaConf):
             model_3d=model_3d,
             use_triadic_token=cfg.policy.get("use_triadic_token", False),
             triadic_mode=cfg.policy.get("triadic_mode", "disabled"),
+            latent_mode=cfg.get("latent_mode", cfg.policy.get("latent_mode", "pi3_full")),
+            use_future_loss=cfg.get("use_future_loss", cfg.policy.get("use_future_loss", True)),
+            future_target_mode=cfg.get("future_target_mode", cfg.policy.get("future_target_mode", "pi3_full")),
         )
         normalizer = dataset.get_normalizer()
 
@@ -255,9 +259,12 @@ def main(cfg: OmegaConf):
                     for key, value in loss_dict.items():
                         if isinstance(value, torch.Tensor):
                             metric_tensor = value.float()
-                        else:
+                            reduced_loss_dict[key] = reduce_mean(metric_tensor, world_size).item()
+                        elif isinstance(value, numbers.Number):
                             metric_tensor = torch.tensor(value, device=device, dtype=torch.float32)
-                        reduced_loss_dict[key] = reduce_mean(metric_tensor, world_size).item()
+                            reduced_loss_dict[key] = reduce_mean(metric_tensor, world_size).item()
+                        else:
+                            reduced_loss_dict[key] = value
 
                 if is_rank0:
                     if should_log_metrics:

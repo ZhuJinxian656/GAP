@@ -1,0 +1,24 @@
+# Candidate task subset scaffold for coupling-interface ablations.
+#
+# First stage: use 1 task to verify code paths and evaluation plumbing.
+# Second stage: use 3-5 representative tasks.
+# Do not start with all RoboTwin tasks.
+# Goal: coupling-interface ablation, not full leaderboard sweeping.
+#
+# These categories are placeholders. Candidate task names must be manually
+# verified against ROBOTWIN_ROOT/task_config and the actual data available.
+
+weak_or_parallel:
+  - TODO
+
+asymmetric_collaboration:
+  - place_dual_shoes  # candidate, needs manual verification
+
+symmetric_carrying_or_cooperative:
+  - TODO
+
+relative_motion_or_alignment:
+  - TODO
+
+deformable_or_contact_rich:
+  - TODO

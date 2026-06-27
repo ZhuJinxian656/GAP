@@ -16,6 +16,23 @@ interval: 5
 model_3d: pi3
 dataset_obs_steps: ${n_obs_steps}
 use_pi3_features: true
+latent_mode: pi3_full  # pi3_full | dino_only | pi3_pooled | pi3_compressed | pi3_random_tokens | pi3_token_dropout | pi3_object_hand | pi3_background
+use_future_loss: true
+future_target_mode: pi3_full  # pi3_full | none | pi3_pooled | pi3_compressed | pi3_random_tokens | pi3_token_dropout | pi3_object_hand | pi3_background | interaction_state
+future_loss_weight: 0.1  # preserves the previous hard-coded Pi3 auxiliary loss weight
+
+latent:
+  pi3_num_compressed_tokens: 16
+  pi3_pool_grid: [4, 4]
+  pi3_random_num_tokens: 64
+  pi3_random_seed: 0
+  pi3_token_dropout_rate: 0.0
+  require_token_mask: true
+
+future:
+  pi3_num_compressed_tokens: 16
+  pi3_pool_grid: [4, 4]
+  interaction_loss_weight: 1.0
 
 policy:
   _target_: gap_policy.policy.gap.GAPPolicy
@@ -32,6 +49,16 @@ policy:
   pi3_feature_dim: 1024
   pi3_num_views: 1
   pi3_embed_dim: 1024
+  latent_mode: ${latent_mode}
+  latent: ${latent}
+  use_future_loss: ${use_future_loss}
+  future_target_mode: ${future_target_mode}
+  future_loss_weight: ${future_loss_weight}
+  future: ${future}
+  dinov3_grid_height: 15
+  dinov3_grid_width: 20
+  pi3_grid_height: 17
+  pi3_grid_width: 23
 
   # State encoder config
   state_dim: 14

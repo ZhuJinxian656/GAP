@@ -19,7 +19,8 @@ data_smoke/
 eval_result/
 results/
 logs/
-reports/
+reports/*
+!reports/gap_interface_ablation_notes.md
 wandb/
 outputs/
 multirun/

@@ -1,27 +1,14 @@
 #!/usr/bin/env python
-"""
-Inspect RoboTwin HDF5 files and highlight candidate keys for triadic features.
-"""
+"""Inspect RoboTwin HDF5 files and summarize candidate supervision fields."""
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Mapping, Tuple
 
 import numpy as np
-
-GAP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, GAP_ROOT)
-
-from gap_policy.triadic import (  # noqa: E402
-    DEFAULT_LEFT_EEF_KEYS,
-    DEFAULT_LEFT_GRIPPER_KEYS,
-    DEFAULT_OBJECT_KEYS,
-    DEFAULT_PROPRIO_KEYS,
-    DEFAULT_RIGHT_EEF_KEYS,
-    DEFAULT_RIGHT_GRIPPER_KEYS,
-)
 
 try:
     import h5py
@@ -29,23 +16,25 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit("h5py is required to inspect RoboTwin HDF5 files.") from exc
 
 
-CANDIDATE_GROUPS: Dict[str, Tuple[str, ...]] = {
-    "left end-effector pose/position": DEFAULT_LEFT_EEF_KEYS,
-    "right end-effector pose/position": DEFAULT_RIGHT_EEF_KEYS,
-    "left gripper state": DEFAULT_LEFT_GRIPPER_KEYS,
-    "right gripper state": DEFAULT_RIGHT_GRIPPER_KEYS,
-    "object pose/position/keypoints": DEFAULT_OBJECT_KEYS,
-    "proprioception/state fallback": DEFAULT_PROPRIO_KEYS,
-}
-
-HEURISTICS: Dict[str, Tuple[str, ...]] = {
-    "left end-effector pose/position": ("left", "eef", "ee", "tcp", "end_effector"),
-    "right end-effector pose/position": ("right", "eef", "ee", "tcp", "end_effector"),
-    "left gripper state": ("left", "gripper"),
-    "right gripper state": ("right", "gripper"),
-    "object pose/position/keypoints": ("object", "pose", "pos", "position", "keypoint", "point"),
-    "object point cloud": ("object", "pointcloud", "point_cloud", "points"),
-    "segmentation/object id": ("seg", "segment", "mask", "object_id", "id"),
+KEYWORD_GROUPS: Mapping[str, Tuple[str, ...]] = {
+    "rgb/image": ("rgb", "image"),
+    "depth": ("depth",),
+    "camera": ("camera", "cam2world"),
+    "intrinsics": ("intrinsic", "intrinsics"),
+    "extrinsics": ("extrinsic", "extrinsics", "cam2world"),
+    "segmentation": ("seg", "segmentation", "segment"),
+    "mask": ("mask",),
+    "object/id/name": ("object", "obj", "object_id", "object_name"),
+    "object pose": ("object_pose", "object_pos", "object_position", "target_object"),
+    "object keypoints": ("object_keypoint", "object_points", "keypoint"),
+    "bbox": ("bbox", "bounding_box"),
+    "contact": ("contact", "touch"),
+    "eef/ee/tcp": ("eef", "ee", "tcp", "end_effector", "endpose"),
+    "gripper": ("gripper",),
+    "left": ("left",),
+    "right": ("right",),
+    "joint/action": ("joint", "action", "vector", "qpos", "qvel"),
+    "pointcloud": ("pointcloud", "point_cloud"),
 }
 
 
@@ -56,7 +45,7 @@ def iter_hdf5_files(paths: Iterable[str], max_files: int) -> List[str]:
             files.append(path)
         elif os.path.isdir(path):
             for root, _, names in os.walk(path):
-                for name in names:
+                for name in sorted(names):
                     if name.endswith((".hdf5", ".h5")):
                         files.append(os.path.join(root, name))
                         if len(files) >= max_files:
@@ -68,96 +57,106 @@ def iter_hdf5_files(paths: Iterable[str], max_files: int) -> List[str]:
     return files
 
 
-def describe_array(dataset, sample_items: int) -> str:
-    shape = tuple(dataset.shape)
-    dtype = dataset.dtype
-    summary = f"shape={shape}, dtype={dtype}"
-    if np.prod(shape, dtype=np.int64) == 0:
-        return summary
-    if dtype.kind in {"O", "S", "V"}:
-        return summary + ", sample=<binary/object omitted>"
-    try:
-        sample = dataset[()]
-        arr = np.asarray(sample)
-        if arr.size > sample_items:
-            arr = arr.reshape(-1)[:sample_items]
-        summary += f", sample={np.array2string(arr, threshold=sample_items, edgeitems=sample_items)}"
-    except Exception as exc:
-        summary += f", sample=<unavailable: {exc}>"
-    return summary
+def collect_datasets(handle: h5py.File) -> Dict[str, h5py.Dataset]:
+    datasets: Dict[str, h5py.Dataset] = {}
 
-
-def collect_datasets(handle) -> Dict[str, object]:
-    datasets: Dict[str, object] = {}
-
-    def visitor(name, obj):
+    def visitor(name: str, obj: object) -> None:
         if hasattr(obj, "shape") and hasattr(obj, "dtype"):
-            datasets[f"/{name}"] = obj
+            datasets[f"/{name}"] = obj  # type: ignore[assignment]
 
     handle.visititems(visitor)
     return datasets
 
 
-def candidate_matches(datasets: Dict[str, object]) -> Dict[str, List[str]]:
-    matches: Dict[str, List[str]] = {group: [] for group in CANDIDATE_GROUPS}
-    lower_keys = {key.lower(): key for key in datasets}
-
-    for group, candidates in CANDIDATE_GROUPS.items():
-        for candidate in candidates:
-            clean = candidate.strip("/").lower()
-            for lower_key, original in lower_keys.items():
-                if lower_key == f"/{clean}" or lower_key.endswith(f"/{clean}"):
-                    matches[group].append(original)
-
-    for group, tokens in HEURISTICS.items():
-        matches.setdefault(group, [])
-        for lower_key, original in lower_keys.items():
-            if original in matches[group]:
-                continue
-            hits = [token for token in tokens if token in lower_key]
-            if group.startswith("left") and "right" in lower_key:
-                continue
-            if group.startswith("right") and "left" in lower_key:
-                continue
-            if len(hits) >= 2:
-                matches[group].append(original)
-
-    return {key: sorted(set(value)) for key, value in matches.items()}
+def safe_sample(dataset: h5py.Dataset, sample_items: int) -> object:
+    shape = tuple(dataset.shape)
+    dtype = dataset.dtype
+    if np.prod(shape, dtype=np.int64) == 0:
+        return []
+    if dtype.kind in {"O", "S", "V"}:
+        return "<binary/object omitted>"
+    try:
+        arr = np.asarray(dataset[()])
+        if arr.size > sample_items:
+            arr = arr.reshape(-1)[:sample_items]
+        return arr.tolist()
+    except Exception as exc:  # pragma: no cover - defensive for unusual HDF5 filters.
+        return f"<unavailable: {exc}>"
 
 
-def inspect_file(path: str, sample_items: int) -> None:
-    print(f"\n=== {path} ===")
+def describe_dataset(dataset: h5py.Dataset, sample_items: int) -> Dict[str, object]:
+    return {
+        "shape": list(dataset.shape),
+        "dtype": str(dataset.dtype),
+        "sample": safe_sample(dataset, sample_items=sample_items),
+    }
+
+
+def keyword_hits(datasets: Mapping[str, h5py.Dataset]) -> Dict[str, List[str]]:
+    lower_to_key = {key.lower(): key for key in datasets}
+    result: Dict[str, List[str]] = {}
+    for group, tokens in KEYWORD_GROUPS.items():
+        hits = []
+        for lower_key, original_key in lower_to_key.items():
+            if any(token in lower_key for token in tokens):
+                hits.append(original_key)
+        result[group] = sorted(set(hits))
+    return result
+
+
+def inspect_file(path: str, sample_items: int, print_output: bool = True) -> Dict[str, object]:
     with h5py.File(path, "r") as handle:
         datasets = collect_datasets(handle)
-        print("HDF5 datasets:")
-        for key in sorted(datasets):
-            print(f"  {key}: {describe_array(datasets[key], sample_items)}")
+        dataset_summary = {
+            key: describe_dataset(dataset, sample_items=sample_items)
+            for key, dataset in sorted(datasets.items())
+        }
+        hits = keyword_hits(datasets)
 
-        print("\nCandidate triadic keys:")
-        matches = candidate_matches(datasets)
-        for group, keys in matches.items():
-            if keys:
-                print(f"  {group}:")
-                for key in keys:
-                    print(f"    - {key}: {describe_array(datasets[key], sample_items)}")
-            else:
-                print(f"  {group}: <not found>")
+    summary = {
+        "path": os.path.abspath(path),
+        "dataset_count": len(dataset_summary),
+        "datasets": dataset_summary,
+        "keyword_hits": hits,
+    }
+
+    if print_output:
+        print(f"\n=== {path} ===")
+        print("HDF5 datasets:")
+        for key, info in dataset_summary.items():
+            print(f"  {key}: shape={tuple(info['shape'])}, dtype={info['dtype']}, sample={info['sample']}")
+
+        print("\nKeyword hits:")
+        for group, keys in hits.items():
+            print(f"  {group}: {keys if keys else '<not found>'}")
+
+    return summary
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Print RoboTwin HDF5 hierarchy and candidate triadic-relation keys."
-    )
-    parser.add_argument("paths", nargs="+", help="One or more .hdf5/.h5 files or directories")
-    parser.add_argument("--max_files", type=int, default=5, help="Max files to inspect when a directory is provided")
-    parser.add_argument("--sample_items", type=int, default=8, help="Max scalar values to print per dataset")
+    parser = argparse.ArgumentParser(description="Print RoboTwin HDF5 hierarchy and candidate supervision keys.")
+    parser.add_argument("paths", nargs="*", help="One or more .hdf5/.h5 files or directories")
+    parser.add_argument("--path", action="append", default=[], help="Additional .hdf5/.h5 file or directory")
+    parser.add_argument("--max-files", "--max_files", dest="max_files", type=int, default=5)
+    parser.add_argument("--sample-items", "--sample_items", dest="sample_items", type=int, default=8)
+    parser.add_argument("--save-json", default=None, help="Optional path to save machine-readable summary JSON")
     args = parser.parse_args()
 
-    files = iter_hdf5_files(args.paths, max_files=args.max_files)
+    paths = list(args.paths) + list(args.path)
+    if not paths:
+        raise SystemExit("Provide at least one path via positional args or --path.")
+
+    files = iter_hdf5_files(paths, max_files=args.max_files)
     if not files:
         raise SystemExit("No HDF5 files found.")
-    for path in files:
-        inspect_file(path, sample_items=args.sample_items)
+
+    summaries = [inspect_file(path, sample_items=args.sample_items) for path in files]
+
+    if args.save_json:
+        os.makedirs(os.path.dirname(os.path.abspath(args.save_json)), exist_ok=True)
+        with open(args.save_json, "w", encoding="utf-8") as f:
+            json.dump({"files": summaries}, f, indent=2)
+        print(f"\nSaved JSON summary to: {args.save_json}")
 
 
 if __name__ == "__main__":
