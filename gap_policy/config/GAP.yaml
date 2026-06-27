@@ -37,6 +37,14 @@ policy:
   state_dim: 14
   state_embed_dim: 1024  # Must match DinoV3 embed_dim (1024 for vitl16)
 
+  # Optional object-centric triadic relation token
+  use_triadic_token: false
+  triadic_mode: disabled  # disabled | pairwise | triadic | proprio_only_fallback
+  triadic_dim: null       # inferred from triadic_mode when null
+  triadic_hidden_dim: 1024
+  triadic_dropout: 0.0
+  triadic_include_grippers: true
+
   # Transformer decoder config (for denoising)
   decoder_depth: 4
   decoder_heads: 8

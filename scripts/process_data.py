@@ -7,6 +7,7 @@ import argparse
 import cv2
 import h5py
 import torch
+from contextlib import nullcontext
 
 GAP_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, GAP_ROOT)
@@ -14,6 +15,7 @@ sys.path.insert(0, os.path.join(GAP_ROOT, "thirdparty"))
 from pi3.models.pi3 import Pi3
 
 from gap_policy.model.vision.dinov3_encoder import DINOV3
+from gap_policy.triadic import TriadicConfig, build_triadic_state_from_hdf5
 
 
 PRETRAINED_ROOT = os.environ.get("GAP_PRETRAINED_ROOT", "pretrained")
@@ -71,7 +73,13 @@ def get_temporal_indices(current_idx, observation_chunk, interval):
     return indices
 
 
-def load_hdf5(dataset_path, camera_names=None):
+def parse_key_list(value):
+    if value is None:
+        return None
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def load_hdf5(dataset_path, camera_names=None, triadic_config=None):
     """Load data from HDF5 file (following DP pattern)"""
     if not os.path.isfile(dataset_path):
         print(f"Dataset does not exist at \n{dataset_path}\n")
@@ -94,7 +102,15 @@ def load_hdf5(dataset_path, camera_names=None):
             else:
                 print(f"Warning: Camera {cam_name} not found. Available: {available_cameras}")
 
-    return vector, image_dict
+        triadic_state = None
+        if triadic_config is not None and triadic_config.mode != "disabled":
+            triadic_state = build_triadic_state_from_hdf5(
+                root,
+                triadic_config,
+                warn_fn=lambda msg: print(f"Warning: {msg}"),
+            )
+
+    return vector, image_dict, triadic_state
 
 
 def extract_pi3_features_batch(model, images_batch, device, target_size=None, verbose=False):
@@ -142,12 +158,17 @@ def extract_pi3_features_batch(model, images_batch, device, target_size=None, ve
     imgs_tensor = torch.stack(imgs_tensor_list, dim=0).to(device)
 
     B, N, C, H, W = imgs_tensor.shape
-    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    use_cuda = device.type == "cuda"
+    if use_cuda:
+        dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        autocast_context = torch.amp.autocast("cuda", dtype=dtype)
+    else:
+        autocast_context = nullcontext()
 
     all_point_hidden = []
 
     with torch.no_grad():
-        with torch.amp.autocast('cuda', dtype=dtype):
+        with autocast_context:
             for b in range(B):
                 imgs_input = imgs_tensor[b:b+1]  # [1, N, 3, H, W]
                 imgs_input = (imgs_input - model.image_mean) / model.image_std
@@ -297,6 +318,35 @@ def main():
         ),
         help="DINOv3 checkpoint path",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=os.environ.get("GAP_DEVICE", "cuda:0" if torch.cuda.is_available() else "cpu"),
+        help="Feature extraction device. Use cpu for dependency smoke tests when CUDA is unavailable.",
+    )
+    parser.add_argument(
+        "--max_frames_per_episode",
+        type=int,
+        default=None,
+        help="Optional debug limit for short preprocessing smoke tests.",
+    )
+    parser.add_argument(
+        "--triadic_mode",
+        type=str,
+        choices=["disabled", "pairwise", "triadic", "proprio_only_fallback"],
+        default=os.environ.get("TRIADIC_MODE", "disabled"),
+        help="Optional triadic relation state to save in the generated zarr",
+    )
+    parser.add_argument(
+        "--no_triadic_grippers",
+        action="store_true",
+        help="Do not append left/right gripper scalars to triadic_state",
+    )
+    parser.add_argument("--left_eef_keys", type=str, default=None, help="Comma-separated HDF5 candidate keys")
+    parser.add_argument("--right_eef_keys", type=str, default=None, help="Comma-separated HDF5 candidate keys")
+    parser.add_argument("--object_keys", type=str, default=None, help="Comma-separated HDF5 candidate keys")
+    parser.add_argument("--left_gripper_keys", type=str, default=None, help="Comma-separated HDF5 candidate keys")
+    parser.add_argument("--right_gripper_keys", type=str, default=None, help="Comma-separated HDF5 candidate keys")
     args = parser.parse_args()
 
     task_name = args.task_name
@@ -308,13 +358,27 @@ def main():
         args.output_root,
         f"{task_name}-{task_config}-{num}-{args.model_3d}-{args.observation_chunk}-{args.interval}.zarr",
     )
+    triadic_config = TriadicConfig(
+        mode=args.triadic_mode,
+        include_grippers=not args.no_triadic_grippers,
+    )
+    for attr, value in (
+        ("left_eef_keys", parse_key_list(args.left_eef_keys)),
+        ("right_eef_keys", parse_key_list(args.right_eef_keys)),
+        ("object_keys", parse_key_list(args.object_keys)),
+        ("left_gripper_keys", parse_key_list(args.left_gripper_keys)),
+        ("right_gripper_keys", parse_key_list(args.right_gripper_keys)),
+    ):
+        if value is not None:
+            setattr(triadic_config, attr, value)
+    triadic_enabled = triadic_config.mode != "disabled"
 
     if os.path.exists(save_dir):
         shutil.rmtree(save_dir)
     os.makedirs(os.path.dirname(save_dir), exist_ok=True)
 
     # Load models
-    device = torch.device("cuda:0")
+    device = torch.device(args.device)
     pi3_model_name_or_path = resolve_repo_path(args.pi3_model_name_or_path)
     dinov3_repo_dir = resolve_repo_path(args.dinov3_repo_dir)
     dinov3_weights_path = resolve_repo_path(args.dinov3_weights_path)
@@ -346,6 +410,7 @@ def main():
     dinov3_features_arrays = []  # Multi-view dinov3 features
     state_arrays = []
     action_arrays = []
+    triadic_state_arrays = []
     episode_ends_arrays = []
 
     print(f"Processing with cameras: {args.cameras}")
@@ -366,6 +431,7 @@ def main():
     batch_images = []  # Buffer for batched temporal images
     batch_states = []  # Buffer for batched states
     batch_head_imgs = []  # Buffer for head camera images (current frame only)
+    batch_triadic_states = []  # Buffer for optional triadic states
 
     def process_batch():
         """Process accumulated batch of temporal images"""
@@ -419,17 +485,36 @@ def main():
             features_3d_arrays.append(current_frame_features_3d)
             dinov3_features_arrays.append(current_frame_features_dinov3)
             state_arrays.append(batch_states[i])
+            if triadic_enabled:
+                triadic_state_arrays.append(batch_triadic_states[i])
 
         # Clear batch buffers
         batch_images.clear()
         batch_states.clear()
         batch_head_imgs.clear()
+        batch_triadic_states.clear()
 
     while current_ep < num:
         print(f"processing episode: {current_ep + 1} / {num}", end="\r")
 
         load_path = os.path.join(load_dir, f"data/episode{current_ep}.hdf5")
-        vector_all, image_dict_all = load_hdf5(load_path, camera_names=args.cameras)
+        vector_all, image_dict_all, triadic_state_all = load_hdf5(
+            load_path,
+            camera_names=args.cameras,
+            triadic_config=triadic_config if triadic_enabled else None,
+        )
+        if triadic_enabled:
+            if triadic_state_all is None:
+                raise RuntimeError(
+                    "triadic_state could not be built for this HDF5 file. "
+                    "Run scripts/inspect_robotwin_hdf5_keys.py and pass candidate keys, "
+                    "or use --triadic_mode proprio_only_fallback."
+                )
+            if triadic_state_all.shape[0] < vector_all.shape[0]:
+                raise RuntimeError(
+                    f"triadic_state length {triadic_state_all.shape[0]} is shorter than "
+                    f"joint_action/vector length {vector_all.shape[0]}."
+                )
 
         # Decode all images for this episode first
         episode_images = {}  # {cam_name: [frames]}
@@ -445,6 +530,8 @@ def main():
                 print(f"\nWarning: Camera {cam_name} not found in episode {current_ep}")
 
         num_frames_in_episode = vector_all.shape[0]
+        if args.max_frames_per_episode is not None:
+            num_frames_in_episode = min(num_frames_in_episode, args.max_frames_per_episode)
         for j in range(num_frames_in_episode):
             
             joint_state = vector_all[j]
@@ -486,6 +573,8 @@ def main():
                     features_3d_arrays.append(current_frame_features_3d)
                     dinov3_features_arrays.append(current_frame_features_dinov3)
                     state_arrays.append(joint_state)
+                    if triadic_enabled:
+                        triadic_state_arrays.append(triadic_state_all[j].astype(np.float32))
 
                 else:
                     temporal_indices = get_temporal_indices(j, args.observation_chunk, args.interval)
@@ -501,6 +590,8 @@ def main():
                     batch_images.append(temporal_images_list)
                     batch_states.append(joint_state)
                     batch_head_imgs.append(episode_images[args.cameras[0]][j])
+                    if triadic_enabled:
+                        batch_triadic_states.append(triadic_state_all[j].astype(np.float32))
 
                     if len(batch_images) >= args.batch_size:
                         process_batch()
@@ -513,7 +604,7 @@ def main():
             process_batch()
 
         current_ep += 1
-        total_count += vector_all.shape[0] - 1
+        total_count += num_frames_in_episode - 1
         episode_ends_arrays.append(total_count)
 
     print(f"Total frames: {total_count}")
@@ -524,6 +615,8 @@ def main():
     features_3d_arrays = np.array(features_3d_arrays)  # [T, N_views, num_patches, embed_dim]
     dinov3_features_arrays = np.array(dinov3_features_arrays)  # [T, N_views, num_patches, embed_dim]
     action_arrays = np.array(action_arrays)
+    if triadic_enabled:
+        triadic_state_arrays = np.array(triadic_state_arrays, dtype=np.float32)
 
     head_camera_arrays = np.moveaxis(head_camera_arrays, -1, 1)
 
@@ -534,6 +627,8 @@ def main():
     head_camera_chunk_size = (100, *head_camera_arrays.shape[1:])
     features_3d_chunk_size = (100, *features_3d_arrays.shape[1:])
     dinov3_features_chunk_size = (100, *dinov3_features_arrays.shape[1:])
+    if triadic_enabled:
+        triadic_state_chunk_size = (100, triadic_state_arrays.shape[1])
 
     # Use the 3D model name in the dataset key
     features_3d_key = f"{args.model_3d}_features"
@@ -578,6 +673,15 @@ def main():
         overwrite=True,
         compressor=compressor,
     )
+    if triadic_enabled:
+        zarr_data.create_dataset(
+            "triadic_state",
+            data=triadic_state_arrays,
+            chunks=triadic_state_chunk_size,
+            dtype="float32",
+            overwrite=True,
+            compressor=compressor,
+        )
     zarr_meta.create_dataset(
         "episode_ends",
         data=episode_ends_arrays,
@@ -592,6 +696,8 @@ def main():
     print(f"  dinov3_features: {dinov3_features_arrays.shape}")
     print(f"  state: {state_arrays.shape}")
     print(f"  action: {action_arrays.shape}")
+    if triadic_enabled:
+        print(f"  triadic_state: {triadic_state_arrays.shape}")
     print(f"  episode_ends: {episode_ends_arrays.shape}")
 
 if __name__ == "__main__":

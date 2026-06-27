@@ -19,6 +19,7 @@ from datetime import datetime
 import importlib
 import argparse
 import pdb
+from shutil import which
 
 from generate_episode_instructions import *
 
@@ -62,6 +63,17 @@ def get_embodiment_config(robot_file):
     return embodiment_args
 
 
+def get_ffmpeg_exe():
+    ffmpeg_exe = which("ffmpeg")
+    if ffmpeg_exe:
+        return ffmpeg_exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 def main(usr_args):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     task_name = usr_args["task_name"]
@@ -71,6 +83,7 @@ def main(usr_args):
     policy_name = usr_args["policy_name"]
     instruction_type = usr_args["instruction_type"]
     seed = usr_args["seed"]
+    test_num = int(usr_args.get("test_num", 100))
     save_dir = None
     video_save_dir = None
     video_size = None
@@ -83,6 +96,9 @@ def main(usr_args):
     args['task_name'] = task_name
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
+    for optional_key in ("eval_video_log", "render_freq", "clear_cache_freq"):
+        if optional_key in usr_args:
+            args[optional_key] = usr_args[optional_key]
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
@@ -163,7 +179,6 @@ def main(usr_args):
 
     st_seed = 100000 * (1 + seed)
     suc_nums = []
-    test_num = 100
     topk = 1
 
     model = get_model(usr_args)
@@ -267,7 +282,7 @@ def eval_policy(task_name,
         if TASK_ENV.eval_video_path is not None:
             ffmpeg = subprocess.Popen(
                 [
-                    "ffmpeg",
+                    get_ffmpeg_exe(),
                     "-y",
                     "-loglevel",
                     "error",

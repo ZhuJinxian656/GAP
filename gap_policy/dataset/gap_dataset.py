@@ -46,10 +46,13 @@ class GAPDataset(BaseDataset):
         task_name=None,
         use_pi3_features=True,  # Whether to load pi3 features
         model_3d="pi3",
+        use_triadic_token=False,
+        triadic_mode="disabled",
     ):
         super().__init__()
         self.task_name = task_name
         self.use_pi3_features = use_pi3_features
+        self.use_triadic_token = bool(use_triadic_token) and triadic_mode != "disabled"
 
         # Make path relative to this file
         current_file_path = os.path.abspath(__file__)
@@ -60,6 +63,8 @@ class GAPDataset(BaseDataset):
         keys = ["dinov3_features", "state", "action"]
         if use_pi3_features:
             keys.append(f"{model_3d}_features")
+        if self.use_triadic_token:
+            keys.append("triadic_state")
 
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
@@ -104,6 +109,8 @@ class GAPDataset(BaseDataset):
             print(f"  Pi3 features shape: {self.replay_buffer['pi3_features'].shape}")
         print(f"  State shape: {self.replay_buffer['state'].shape}")
         print(f"  Action shape: {self.replay_buffer['action'].shape}")
+        if self.use_triadic_token:
+            print(f"  Triadic state shape: {self.replay_buffer['triadic_state'].shape}")
 
     def get_validation_dataset(self):
         """Create validation dataset with same parameters"""
@@ -127,6 +134,8 @@ class GAPDataset(BaseDataset):
             "action": self.replay_buffer["action"],
             "agent_pos": self.replay_buffer["state"],  # State is agent_pos
         }
+        if self.use_triadic_token:
+            data["triadic_state"] = self.replay_buffer["triadic_state"]
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
 
@@ -191,6 +200,10 @@ class GAPDataset(BaseDataset):
             "agent_pos": agent_pos,  # [14] - single state
         }
 
+        if self.use_triadic_token and "triadic_state" in sample:
+            triadic_state = sample["triadic_state"].astype(np.float32)
+            obs_dict["triadic_state"] = triadic_state[0]
+
         # Add Pi3 features if available (current frame for encoding)
         if self.use_pi3_features and "pi3_features" in sample:
             # Pi3 features [T, N_views, num_patches, 1024] - we only use first frame for observation
@@ -221,6 +234,7 @@ class GAPDataset(BaseDataset):
                     dinov3_features: [N_views, num_patches, D] float32
                     pi3_features: [N_views, num_patches, 1024] float32 (if use_pi3_features=True)
                     agent_pos: [14] float32
+                    triadic_state: [D_rel] float32 (if use_triadic_token=True)
                 action: [T, 14] float32
                 future_pi3_features: [N_views, num_patches, 1024] float32 (if use_pi3_features=True)
                     - Ground truth pi3 features for the last frame of action chunk

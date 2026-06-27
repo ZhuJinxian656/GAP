@@ -19,6 +19,7 @@ data_smoke/
 eval_result/
 results/
 logs/
+reports/
 wandb/
 outputs/
 multirun/
@@ -30,7 +31,14 @@ multirun/
 *.safetensors
 *.zarr/
 *.hdf5
+*.h5
+*.npy
+*.npz
 *.mp4
+*.zip
+*.tar
+*.tar.gz
+*.tgz
 
 # OS/editor
 .DS_Store

@@ -18,6 +18,7 @@ batch_size="${BATCH_SIZE:-256}"
 observation_chunk="${OBSERVATION_CHUNK:-20}"
 interval="${INTERVAL:-5}"
 model_3d="${MODEL_3D:-pi3}"
+triadic_mode="${TRIADIC_MODE:-disabled}"
 raw_data_root="${RAW_DATA_ROOT:-${ROBOTWIN_ROOT:+${ROBOTWIN_ROOT}/data}}"
 raw_data_root="${raw_data_root:-./data/raw}"
 output_root="${OUTPUT_ROOT:-./data}"
@@ -30,7 +31,7 @@ export CUDA_VISIBLE_DEVICES="${gpu_id}"
 
 printf 'Processing GAP data\n'
 printf '  task=%s config=%s expert_data_num=%s gpu=%s\n' "${task_name}" "${task_config}" "${expert_data_num}" "${gpu_id}"
-printf '  raw_data_root=%s output_root=%s\n' "${raw_data_root}" "${output_root}"
+printf '  raw_data_root=%s output_root=%s triadic_mode=%s\n' "${raw_data_root}" "${output_root}" "${triadic_mode}"
 
 python scripts/process_data.py \
     "${task_name}" \
@@ -43,6 +44,7 @@ python scripts/process_data.py \
     --interval "${interval}" \
     --raw_data_root "${raw_data_root}" \
     --output_root "${output_root}" \
+    --triadic_mode "${triadic_mode}" \
     --pi3_model_name_or_path "${pi3_model_name_or_path}" \
     --dinov3_repo_dir "${dinov3_repo_dir}" \
     --dinov3_weights_path "${dinov3_weights_path}"

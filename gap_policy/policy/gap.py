@@ -30,6 +30,7 @@ from gap_policy.model.common.normalizer import LinearNormalizer
 from gap_policy.policy.base_policy import BasePolicy
 from gap_policy.common.pytorch_util import dict_apply
 from gap_policy.common.model_util import print_params
+from gap_policy.triadic import infer_triadic_dim
 
 
 # ============================================================================
@@ -346,6 +347,13 @@ class GAPPolicy(BasePolicy):
         # State encoder config
         state_dim=14,
         state_embed_dim=1024,     # Must match feature dimensions
+        # Optional triadic relation token
+        use_triadic_token=False,
+        triadic_mode="disabled",
+        triadic_dim=None,
+        triadic_hidden_dim=1024,
+        triadic_dropout=0.0,
+        triadic_include_grippers=True,
         # Transformer encoder config (for context encoding - ACT-DP-TP style)
         encoder_depth=2,
         encoder_heads=8,
@@ -379,6 +387,25 @@ class GAPPolicy(BasePolicy):
         # State encoder (agent_pos)
         self.state_encoder = nn.Linear(state_dim, state_embed_dim)
 
+        self.use_triadic_token = bool(use_triadic_token)
+        self.triadic_mode = triadic_mode
+        self.triadic_include_grippers = triadic_include_grippers
+        if self.use_triadic_token:
+            if triadic_mode == "disabled":
+                raise ValueError("use_triadic_token=True requires triadic_mode to be pairwise, triadic, or proprio_only_fallback.")
+            if triadic_dim is None:
+                triadic_dim = infer_triadic_dim(triadic_mode, include_grippers=triadic_include_grippers)
+            triadic_hidden_dim = triadic_hidden_dim or state_embed_dim
+            self.triadic_dim = triadic_dim
+            self.triadic_encoder = nn.Sequential(
+                nn.Linear(triadic_dim, triadic_hidden_dim),
+                nn.SiLU(),
+                nn.Dropout(triadic_dropout),
+                nn.Linear(triadic_hidden_dim, state_embed_dim),
+            )
+        else:
+            self.triadic_dim = 0
+
         # Pi3 feature encoder (if using pre-extracted features)
         self.use_pi3_features = use_pi3_features
         if use_pi3_features:
@@ -402,6 +429,8 @@ class GAPPolicy(BasePolicy):
         # Learned position embeddings
         self.cls_pos_embed = nn.Embedding(1, self.feature_dim)  # CLS token position
         self.state_pos_embed = nn.Embedding(1, self.feature_dim)  # State token position
+        if self.use_triadic_token:
+            self.triadic_pos_embed = nn.Embedding(1, self.feature_dim)  # Triadic relation token position
 
         # ========== Context Encoder (ACT-DP-TP style) ==========
         # Context encoder processes [vision_patches, state] -> enriched features
@@ -507,6 +536,7 @@ class GAPPolicy(BasePolicy):
         cprint("[GAP] Configuration:", "cyan")
         cprint(f"  Vision feature dim: {vision_feat_dim}", "cyan")
         cprint(f"  State embed dim: {state_embed_dim}", "cyan")
+        cprint(f"  Triadic token: {self.use_triadic_token} ({triadic_mode}, dim={self.triadic_dim})", "cyan")
         cprint(f"  Encoder depth: {encoder_depth} (Feature encoding)", "cyan")
         cprint(f"  Decoder depth: {decoder_depth} (Action denoising)", "cyan")
         cprint(f"  Action dim: {action_dim}", "cyan")
@@ -616,7 +646,7 @@ class GAPPolicy(BasePolicy):
         Architecture:
         1. Load pre-extracted DinoV3 and Pi3 features
         2. Project features to common dimension
-        3. Concatenate: [CLS token, DinoV3 patches (all views), Pi3 patches (all views), State]
+        3. Concatenate: [CLS, State, Triadic(optional), DinoV3 patches, Pi3 patches(optional)]
         4. Pass through encoder to get enriched memory
         5. Memory serves as context for decoder
 
@@ -625,6 +655,7 @@ class GAPPolicy(BasePolicy):
                 - 'dinov3_features': [B, N_views, num_patches, D] pre-extracted DinoV3 features
                 - 'pi3_features': [B, N_views, num_patches, 1024] pre-extracted Pi3 features (optional)
                 - 'agent_pos': [B, 14] robot state
+                - 'triadic_state': [B, D_rel] relation state (if use_triadic_token=True)
 
         Returns:
             memory: [B, N_tokens, D] - encoder output features
@@ -659,8 +690,20 @@ class GAPPolicy(BasePolicy):
         # 4. Expand CLS token for batch
         cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, D]
 
-        # 5. Concatenate all features: [CLS, DinoV3_patches, Pi3_patches, State]
+        triadic_features = None
+        if self.use_triadic_token:
+            if "triadic_state" not in obs_dict:
+                raise KeyError(
+                    "use_triadic_token=True, but obs_dict does not contain 'triadic_state'. "
+                    "Preprocess data with --triadic_mode or use policy.use_triadic_token=false."
+                )
+            triadic_state = obs_dict["triadic_state"]
+            triadic_features = self.triadic_encoder(triadic_state).unsqueeze(1)  # [B, 1, D]
+
+        # 5. Concatenate all features: [CLS, State, Triadic(optional), DinoV3_patches, Pi3_patches]
         features_list = [cls_tokens, state_features, dinov3_encoded]
+        if triadic_features is not None:
+            features_list = [cls_tokens, state_features, triadic_features, dinov3_encoded]
         if pi3_encoded is not None:
             features_list.append(pi3_encoded)
 
@@ -678,9 +721,14 @@ class GAPPolicy(BasePolicy):
             embedding_dim=self.feature_dim,
             device=device
         ).unsqueeze(0).expand(B, -1, -1)  # [B, N_dinov3_patches*N_dinov3_views, D]
-        encoder_pos = torch.cat([cls_pos, state_pos, dinov3_pos], dim=1)  # [B, N_tokens, D]
+        pos_list = [cls_pos, state_pos]
+        if self.use_triadic_token:
+            triadic_pos = self.triadic_pos_embed.weight.unsqueeze(0).expand(B, -1, -1)  # [B, 1, D]
+            pos_list.append(triadic_pos)
+        pos_list.append(dinov3_pos)
+        encoder_pos = torch.cat(pos_list, dim=1)  # [B, N_tokens, D]
 
-        if self.use_pi3_features:
+        if pi3_encoded is not None:
             pi3_pos = self.get_2d_sinusoidal_positional_encoding(
                 height=17,
                 width=23,

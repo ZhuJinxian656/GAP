@@ -84,6 +84,10 @@ def main(cfg: OmegaConf):
         val_ratio=0.0,
         max_train_episodes=expert_data_num,
         task_name=task_name,
+        use_pi3_features=cfg.get("use_pi3_features", True),
+        model_3d=model_3d,
+        use_triadic_token=cfg.policy.get("use_triadic_token", False),
+        triadic_mode=cfg.policy.get("triadic_mode", "disabled"),
     )
 
     # Get normalizer

@@ -11,6 +11,7 @@ from pi3.models.pi3 import Pi3
 
 from gap_policy.policy.gap import GAPPolicy
 from gap_policy.model.vision.dinov3_encoder import DINOV3
+from gap_policy.triadic import TriadicConfig, build_triadic_state
 
 
 PRETRAINED_ROOT = os.environ.get("GAP_PRETRAINED_ROOT", "pretrained")
@@ -173,6 +174,11 @@ class GAPPolicyWrapper:
         # Store config
         self.n_action_steps = policy_cfg.n_action_steps
         self.state_dim = policy_cfg.state_dim
+        self.use_triadic_token = policy_cfg.get("use_triadic_token", False)
+        self.triadic_config = TriadicConfig(
+            mode=policy_cfg.get("triadic_mode", "disabled"),
+            include_grippers=policy_cfg.get("triadic_include_grippers", True),
+        )
 
     def reset(self):
         """Reset policy state between episodes (GAP is stateless)"""
@@ -257,13 +263,14 @@ class GAPPolicyWrapper:
 
         return point_hidden.unsqueeze(0)  # [1, N, num_patches, 1024]
 
-    def get_action(self, rgb_image: np.ndarray, state: np.ndarray) -> np.ndarray:
+    def get_action(self, rgb_image: np.ndarray, state: np.ndarray, raw_observation=None) -> np.ndarray:
         """
         Get action chunk based on current observation
 
         Args:
             rgb_image: numpy array [H, W, 3] RGB image
             state: numpy array [state_dim] proprioceptive state (joint positions, etc.)
+            raw_observation: optional full RoboTwin observation for triadic key lookup
 
         Returns:
             actions: numpy array [n_action_steps, action_dim] action chunk
@@ -290,6 +297,28 @@ class GAPPolicyWrapper:
 
         if pi3_features is not None:
             obs_dict["pi3_features"] = pi3_features
+
+        if self.use_triadic_token:
+            triadic_source = {"agent_pos": state}
+            if raw_observation is not None:
+                triadic_source["raw_observation"] = raw_observation
+            triadic_state = build_triadic_state(
+                triadic_source,
+                self.triadic_config,
+                warn_fn=lambda msg: cprint(f"[GAP] {msg}", "yellow"),
+            )
+            if triadic_state is None:
+                raise ValueError(
+                    "Checkpoint expects a triadic_state token, but the current evaluation "
+                    "observation does not expose the required candidate keys. Use a vanilla "
+                    "checkpoint, pass object/EEF keys, or train with triadic_mode=proprio_only_fallback."
+                )
+            triadic_tensor = torch.as_tensor(triadic_state, dtype=torch.float32, device=self.device)
+            if triadic_tensor.ndim == 1:
+                triadic_tensor = triadic_tensor.unsqueeze(0)
+            elif triadic_tensor.ndim > 2:
+                triadic_tensor = triadic_tensor.reshape(-1, triadic_tensor.shape[-1])[:1]
+            obs_dict["triadic_state"] = triadic_tensor
 
         # Predict action chunk
         with torch.no_grad():
@@ -406,7 +435,7 @@ def eval(TASK_ENV, model: GAPPolicyWrapper, observation, episode_info=None):
     # Extract observation
     obs = encode_obs(observation)
 
-    actions = model.get_action(obs["rgb"], obs["state"])
+    actions = model.get_action(obs["rgb"], obs["state"], raw_observation=observation)
 
     for action in actions:
         TASK_ENV.take_action(action)

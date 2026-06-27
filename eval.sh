@@ -18,6 +18,7 @@ expert_data_num="${4:-${EXPERT_DATA_NUM:-100}}"
 checkpoint_num="${5:-${CHECKPOINT_NUM:-300}}"
 gpu_id="${6:-${GPU_ID:-0}}"
 seed_list="${7:-${SEEDS:-0}}"
+test_num="${8:-${TEST_NUM:-100}}"
 ckpt_path="${CKPT_PATH:-checkpoints/${task_name}_${ckpt_setting}_${expert_data_num}/${checkpoint_num}.ckpt}"
 results_root="${RESULTS_ROOT:-${GAP_ROOT}/results}"
 
@@ -54,7 +55,7 @@ cd "${ROBOTWIN_ROOT}"
 printf 'Evaluating GAP policy\n'
 printf '  gap_root=%s robotwin_root=%s\n' "${GAP_ROOT}" "${ROBOTWIN_ROOT}"
 printf '  results_root=%s\n' "${results_root}"
-printf '  task=%s config=%s checkpoint=%s gpu=%s seeds=%s\n' "${task_name}" "${task_config}" "${checkpoint_file}" "${gpu_id}" "${seed_list}"
+printf '  task=%s config=%s checkpoint=%s gpu=%s seeds=%s test_num=%s\n' "${task_name}" "${task_config}" "${checkpoint_file}" "${gpu_id}" "${seed_list}" "${test_num}"
 
 for seed in "${seeds[@]}"; do
     PYTHONWARNINGS=ignore::UserWarning \
@@ -67,6 +68,7 @@ for seed in "${seeds[@]}"; do
         --expert_data_num "${expert_data_num}" \
         --seed "${seed}" \
         --checkpoint_num "${checkpoint_num}" \
-        --ckpt_path "${checkpoint_file}"
+        --ckpt_path "${checkpoint_file}" \
+        --test_num "${test_num}"
 
 done
