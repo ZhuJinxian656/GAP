@@ -18,6 +18,7 @@ data/
 data_smoke/
 eval_result/
 results/
+results_smoke_eval/
 logs/
 reports/*
 !reports/gap_interface_ablation_notes.md

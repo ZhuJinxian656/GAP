@@ -899,3 +899,28 @@ Queue status log:
 ```bash
 tail -f logs/gap_ablation_queue.log
 ```
+
+Evaluation environment smoke:
+
+```bash
+env PATH=/data1/home/zhu_jinxian/worldarena-dataengine-research/.conda/BWM/bin:$PATH \
+  ROBOTWIN_ROOT=/data1/home/zhu_jinxian/project/robotwin \
+  CKPT_PATH=/data1/home/zhu_jinxian/project/GAP/checkpoints/place_dual_shoes_demo_clean_50/200.ckpt \
+  RESULTS_ROOT=/data1/home/zhu_jinxian/project/GAP/results_smoke_eval \
+  bash eval.sh place_dual_shoes demo_clean demo_clean_smoke_env 50 200 4 0 1
+```
+
+This completed a real RoboTwin rollout with DINOv3/Pi3/checkpoint loading and
+saved `_result.txt` plus `episode0.mp4` under `results_smoke_eval/`. The
+episode failed (`0/1`), but the purpose was to verify the evaluation stack and
+avoid the earlier `sapien` import failure; success-rate claims still require
+the full eval runs below.
+
+The six ablation evals are queued through
+`scripts/launch_gap_ablation_eval_queue.sh` in tmux session
+`gap_eval_ablation_queue`. It waits for all six `200.ckpt` files and then runs
+10 rollouts per ablation sequentially on GPU 4:
+
+```bash
+tail -f logs/gap_eval_ablation_queue.log
+```
