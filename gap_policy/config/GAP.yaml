@@ -179,6 +179,7 @@ multi_run:
   wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
 
 checkpoint_num: 200
+checkpoint_tag: null
 expert_data_num: 100
 raw_task_name: none
 setting: none

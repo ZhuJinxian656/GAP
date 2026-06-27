@@ -93,7 +93,9 @@ def command_for(
 ) -> str:
     overrides = VARIANT_OVERRIDES[variant]
     exp_name = f"{task}_{setting}_{expert_data_num}_{variant}_seed{seed}"
+    checkpoint_tag = f"{setting}_{variant}_seed{seed}"
     overrides = overrides + [
+        f"checkpoint_tag={checkpoint_tag}",
         f"exp_name={exp_name}",
         f"logging.name={exp_name}",
     ]

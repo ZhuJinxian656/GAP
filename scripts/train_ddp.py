@@ -288,7 +288,13 @@ def main(cfg: OmegaConf):
                         "train/epoch": epoch,
                     }, step=global_step)
 
-                checkpoint_dir = os.path.join(os.getcwd(), "checkpoints", f"{task_name}_{setting}_{expert_data_num}")
+                checkpoint_tag = cfg.get("checkpoint_tag", None)
+                checkpoint_dir_name = (
+                    f"{task_name}_{checkpoint_tag}_{expert_data_num}"
+                    if checkpoint_tag
+                    else f"{task_name}_{setting}_{expert_data_num}"
+                )
+                checkpoint_dir = os.path.join(os.getcwd(), "checkpoints", checkpoint_dir_name)
                 if (epoch + 1) % cfg.training.checkpoint_every == 0:
                     checkpoint_path = os.path.join(checkpoint_dir, f"{epoch+1}.ckpt")
                     os.makedirs(checkpoint_dir, exist_ok=True)
