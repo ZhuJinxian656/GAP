@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Evaluate each GAP ablation as soon as its 200-epoch checkpoint appears.
-# Evaluation is kept on a separate GPU to avoid perturbing the three-GPU
-# training queue.
+# Evaluate GAP ablations on a single eval GPU. The queue polls all variants and
+# runs whichever checkpoint is ready first, so later variants are not blocked by
+# an earlier slow run.
 
 ROOT_DIR="/data1/home/zhu_jinxian/project/GAP"
 ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-/data1/home/zhu_jinxian/project/robotwin}"
@@ -46,17 +46,6 @@ result_path_for() {
   printf 'results/place_dual_shoes/GAP/demo_clean/%s/seed_0/200/_result.txt' "$ckpt_setting"
 }
 
-wait_for_checkpoint() {
-  local variant="$1"
-  local ckpt
-  ckpt="$(checkpoint_path_for "$variant")"
-
-  while [ ! -f "$ckpt" ]; do
-    printf '[%s] Waiting for checkpoint %s: %s\n' "$(date '+%F %T')" "$variant" "$ckpt"
-    sleep "$POLL_SECONDS"
-  done
-}
-
 refresh_summary() {
   python scripts/summarize_gap_ablation_results.py \
     --root "$ROOT_DIR" \
@@ -77,7 +66,7 @@ run_eval() {
 
   if [ "${FORCE_EVAL:-0}" != "1" ] && [ -f "$result" ]; then
     printf '[%s] Skip eval %s: result exists at %s\n' "$(date '+%F %T')" "$variant" "$result"
-    return
+    return 0
   fi
 
   printf '[%s] Eval %s using %s -> %s\n' "$(date '+%F %T')" "$variant" "$ckpt" "$log_file"
@@ -87,10 +76,46 @@ run_eval() {
     > "$log_file" 2>&1
 }
 
-for variant in "${VARIANTS[@]}"; do
-  wait_for_checkpoint "$variant"
-  run_eval "$variant"
-  refresh_summary
+declare -A DONE=()
+completed=0
+total=${#VARIANTS[@]}
+
+while [ "$completed" -lt "$total" ]; do
+  progressed=0
+  waiting=()
+
+  for variant in "${VARIANTS[@]}"; do
+    if [ "${DONE[$variant]:-0}" = "1" ]; then
+      continue
+    fi
+
+    ckpt="$(checkpoint_path_for "$variant")"
+    result="$(result_path_for "$variant")"
+
+    if [ "${FORCE_EVAL:-0}" != "1" ] && [ -f "$result" ]; then
+      printf '[%s] Mark done %s: result exists at %s\n' "$(date '+%F %T')" "$variant" "$result"
+      DONE[$variant]=1
+      completed=$((completed + 1))
+      progressed=1
+      continue
+    fi
+
+    if [ -f "$ckpt" ]; then
+      run_eval "$variant"
+      refresh_summary
+      DONE[$variant]=1
+      completed=$((completed + 1))
+      progressed=1
+    else
+      waiting+=("${variant}: ${ckpt}")
+    fi
+  done
+
+  if [ "$completed" -lt "$total" ] && [ "$progressed" -eq 0 ]; then
+    printf '[%s] Waiting for checkpoints (%s/%s complete): %s\n' \
+      "$(date '+%F %T')" "$completed" "$total" "${waiting[*]}"
+    sleep "$POLL_SECONDS"
+  fi
 done
 
 printf '[%s] Eval queue completed.\n' "$(date '+%F %T')"

@@ -922,9 +922,10 @@ the full eval runs below.
 
 The six ablation evals are queued through
 `scripts/launch_gap_ablation_eval_queue.sh` in tmux session
-`gap_eval_ablation_queue`. It evaluates each ablation as soon as that
-variant's `200.ckpt` appears, using GPU 4 for 10 rollouts, and refreshes the
-summary after each eval:
+`gap_eval_ablation_queue`. It polls all pending variants, evaluates whichever
+`200.ckpt` is ready first, uses GPU 4 for 10 rollouts, and refreshes the
+summary after each eval. This keeps evaluation single-GPU and avoids blocking a
+ready later variant behind an earlier slow run:
 
 ```bash
 tail -f logs/gap_eval_ablation_queue.log

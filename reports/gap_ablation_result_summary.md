@@ -1,18 +1,18 @@
 # GAP Interface Ablation Result Summary
 
-Generated: 2026-06-27 18:42:28
+Generated: 2026-06-27 18:47:38
 
 Task: `place_dual_shoes`  Config: `demo_clean`  Demos: `50`  Seed: `0`  Checkpoint: `200`
 
 | variant        | checkpoint | latest epoch/loss | eval success | result file                                                               | question                                                  |
 | -------------- | ---------- | ----------------- | ------------ | ------------------------------------------------------------------------- | --------------------------------------------------------- |
 | vanilla        | ready      | not found         | 0.300        | results/place_dual_shoes/GAP/demo_clean/demo_clean/seed_0/200/_result.txt | Full Pi3 scene tokens plus full future Pi3 latent target. |
-| dino_only      | pending    | 87 / 0.0004       | pending      | pending                                                                   | No Pi3 observation and no future latent supervision.      |
-| no_future      | pending    | 42 / 0.0013       | pending      | pending                                                                   | Full Pi3 observation, but future latent loss disabled.    |
-| pi3_pooled     | pending    | 49 / 0.0014       | pending      | pending                                                                   | Pooled Pi3 tokens and pooled future target.               |
-| pi3_compressed | pending    | 1 / 0.1915        | pending      | pending                                                                   | Compressed Pi3 bottleneck and compressed future target.   |
-| pi3_random     | pending    | 1 / 0.1569        | pending      | pending                                                                   | Random Pi3 token subset and random-token future target.   |
-| pi3_dropout    | pending    | 1 / 0.1594        | pending      | pending                                                                   | Full future Pi3 target with observation token dropout.    |
+| dino_only      | pending    | 93 / 0.0003       | pending      | pending                                                                   | No Pi3 observation and no future latent supervision.      |
+| no_future      | pending    | 44 / 0.0018       | pending      | pending                                                                   | Full Pi3 observation, but future latent loss disabled.    |
+| pi3_pooled     | pending    | 52 / 0.0013       | pending      | pending                                                                   | Pooled Pi3 tokens and pooled future target.               |
+| pi3_compressed | pending    | 4 / 0.0148        | pending      | pending                                                                   | Compressed Pi3 bottleneck and compressed future target.   |
+| pi3_random     | pending    | 3 / 0.0143        | pending      | pending                                                                   | Random Pi3 token subset and random-token future target.   |
+| pi3_dropout    | pending    | 3 / 0.0145        | pending      | pending                                                                   | Full future Pi3 target with observation token dropout.    |
 
 ## Interpretation Guardrails
 
