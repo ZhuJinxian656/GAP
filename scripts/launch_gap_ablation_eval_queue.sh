@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Wait for the six 200-epoch GAP ablation checkpoints, then evaluate each one
-# sequentially. Evaluation is kept on a separate GPU to avoid perturbing the
-# three-GPU training queue.
+# Evaluate each GAP ablation as soon as its 200-epoch checkpoint appears.
+# Evaluation is kept on a separate GPU to avoid perturbing the three-GPU
+# training queue.
 
 ROOT_DIR="/data1/home/zhu_jinxian/project/GAP"
 ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-/data1/home/zhu_jinxian/project/robotwin}"
@@ -46,24 +46,21 @@ result_path_for() {
   printf 'results/place_dual_shoes/GAP/demo_clean/%s/seed_0/200/_result.txt' "$ckpt_setting"
 }
 
-wait_for_all_checkpoints() {
-  while true; do
-    local missing=()
-    for variant in "${VARIANTS[@]}"; do
-      local ckpt
-      ckpt="$(checkpoint_path_for "$variant")"
-      if [ ! -f "$ckpt" ]; then
-        missing+=("$ckpt")
-      fi
-    done
+wait_for_checkpoint() {
+  local variant="$1"
+  local ckpt
+  ckpt="$(checkpoint_path_for "$variant")"
 
-    if [ "${#missing[@]}" -eq 0 ]; then
-      break
-    fi
-
-    printf '[%s] Waiting for checkpoints: %s\n' "$(date '+%F %T')" "${missing[*]}"
+  while [ ! -f "$ckpt" ]; do
+    printf '[%s] Waiting for checkpoint %s: %s\n' "$(date '+%F %T')" "$variant" "$ckpt"
     sleep "$POLL_SECONDS"
   done
+}
+
+refresh_summary() {
+  python scripts/summarize_gap_ablation_results.py \
+    --root "$ROOT_DIR" \
+    --output reports/gap_ablation_result_summary.md
 }
 
 run_eval() {
@@ -90,14 +87,10 @@ run_eval() {
     > "$log_file" 2>&1
 }
 
-wait_for_all_checkpoints
-
 for variant in "${VARIANTS[@]}"; do
+  wait_for_checkpoint "$variant"
   run_eval "$variant"
+  refresh_summary
 done
-
-python scripts/summarize_gap_ablation_results.py \
-  --root "$ROOT_DIR" \
-  --output reports/gap_ablation_result_summary.md
 
 printf '[%s] Eval queue completed.\n' "$(date '+%F %T')"

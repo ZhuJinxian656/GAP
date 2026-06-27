@@ -919,15 +919,15 @@ the full eval runs below.
 
 The six ablation evals are queued through
 `scripts/launch_gap_ablation_eval_queue.sh` in tmux session
-`gap_eval_ablation_queue`. It waits for all six `200.ckpt` files and then runs
-10 rollouts per ablation sequentially on GPU 4:
+`gap_eval_ablation_queue`. It evaluates each ablation as soon as that
+variant's `200.ckpt` appears, using GPU 4 for 10 rollouts, and refreshes the
+summary after each eval:
 
 ```bash
 tail -f logs/gap_eval_ablation_queue.log
 ```
 
-The eval queue refreshes `reports/gap_ablation_result_summary.md` after all
-queued evals finish. It can also be updated manually:
+The summary can also be updated manually:
 
 ```bash
 python scripts/summarize_gap_ablation_results.py --root .
