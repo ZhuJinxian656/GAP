@@ -91,6 +91,30 @@ def latest_epoch_loss(log_file: Path) -> tuple[Optional[int], Optional[float]]:
     return latest_epoch, latest_loss
 
 
+def candidate_logs(root: Path, variant: Variant) -> list[Path]:
+    if not variant.log_path:
+        return []
+
+    configured = root / variant.log_path
+    matches = sorted((root / "logs").glob(f"gap_ablate_{variant.name}_gpu*.log"))
+    if configured.is_file() and configured not in matches:
+        matches.append(configured)
+    return matches
+
+
+def latest_epoch_loss_from_logs(log_files: Iterable[Path]) -> tuple[Optional[int], Optional[float]]:
+    best_epoch: Optional[int] = None
+    best_loss: Optional[float] = None
+    for log_file in log_files:
+        epoch, loss = latest_epoch_loss(log_file)
+        if epoch is None:
+            continue
+        if best_epoch is None or epoch > best_epoch:
+            best_epoch = epoch
+            best_loss = loss
+    return best_epoch, best_loss
+
+
 def parse_success_rate(result_file: Path) -> Optional[float]:
     if not result_file.is_file():
         return None
@@ -170,7 +194,6 @@ def build_report(args: argparse.Namespace) -> str:
     rates: dict[str, Optional[float]] = {}
     for variant in variants:
         ckpt_path = root / variant.checkpoint_dir / f"{args.checkpoint}.ckpt"
-        log_path = root / variant.log_path if variant.log_path else Path()
         result_path = result_file_for(
             root=root,
             task=args.task,
@@ -180,7 +203,7 @@ def build_report(args: argparse.Namespace) -> str:
             seed=args.seed,
             checkpoint=args.checkpoint,
         )
-        epoch, loss = latest_epoch_loss(log_path) if variant.log_path else (None, None)
+        epoch, loss = latest_epoch_loss_from_logs(candidate_logs(root, variant))
         rate = parse_success_rate(result_path)
         rates[variant.name] = rate
 

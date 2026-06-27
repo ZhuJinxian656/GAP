@@ -20,7 +20,7 @@ Current state:
 
 - Local repo: `/data1/home/zhu_jinxian/project/GAP`
 - Current branch: `codex/gap-robotwin-baseline-sync`
-- Current commit: `e9314bb57aa7e7e0dd8e241718ff45a535a360e5`
+- Inspection-time commit: `e9314bb57aa7e7e0dd8e241718ff45a535a360e5`
 - Worktree status at inspection: clean
 - Upstream remote: `origin -> https://github.com/Chongyang-99/GAP.git`
 - User fork remote: `zhu -> git@github.com-zhu-gap:ZhuJinxian656/GAP.git`
@@ -883,17 +883,20 @@ bash eval.sh place_dual_shoes demo_clean demo_clean_no_future_seed0 50 200 2 0 1
 bash eval.sh place_dual_shoes demo_clean demo_clean_pi3_pooled_seed0 50 200 3 0 10
 ```
 
-To keep the machine at three concurrent training jobs, the second token-level
-batch is queued through `scripts/launch_gap_ablation_queue.sh` in tmux session
-`gap_ablate_queue`. The queue is GPU-slot based: when one first-batch session
-exits, the next variant for that same GPU starts immediately instead of
-waiting for all first-batch runs to finish.
+The second token-level batch was initially queued through
+`scripts/launch_gap_ablation_queue.sh` in tmux session `gap_ablate_queue`.
+After confirming that GPUs 5/6/7 were idle and the 4090s had enough memory,
+the second batch was launched immediately through
+`scripts/launch_gap_ablation_second_batch_now.sh`. GPU 4 remains reserved for
+the eval queue. The old queue session is left as a fallback; when the first
+batch exits, it will skip any second-batch run whose tmux session or 200-epoch
+checkpoint already exists.
 
 | Session | GPU | Variant | Log | Checkpoint directory |
 | --- | ---: | --- | --- | --- |
-| `gap_ablate_pi3_compressed` | 1 | compressed Pi3 observation plus compressed future target | `logs/gap_ablate_pi3_compressed_gpu1.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_compressed_seed0_50/` |
-| `gap_ablate_pi3_random` | 2 | random Pi3 token subset plus random-token future target | `logs/gap_ablate_pi3_random_gpu2.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_random_seed0_50/` |
-| `gap_ablate_pi3_dropout` | 3 | full Pi3 future target with token dropout in observation | `logs/gap_ablate_pi3_dropout_gpu3.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_dropout_seed0_50/` |
+| `gap_ablate_pi3_compressed` | 5 | compressed Pi3 observation plus compressed future target | `logs/gap_ablate_pi3_compressed_gpu5.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_compressed_seed0_50/` |
+| `gap_ablate_pi3_random` | 6 | random Pi3 token subset plus random-token future target | `logs/gap_ablate_pi3_random_gpu6.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_random_seed0_50/` |
+| `gap_ablate_pi3_dropout` | 7 | full Pi3 future target with token dropout in observation | `logs/gap_ablate_pi3_dropout_gpu7.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_dropout_seed0_50/` |
 
 Queue status log:
 
