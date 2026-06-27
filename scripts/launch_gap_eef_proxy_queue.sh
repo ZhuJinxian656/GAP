@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Queue EEF-projected hand-near proxy ablations after current first-batch GPU
+# slots become free. These are not true object-hand masks; they probe whether
+# Pi3/future latent signal is concentrated around projected end-effector areas.
+
+ROOT_DIR="/data1/home/zhu_jinxian/project/GAP"
+BWM_BIN="/data1/home/zhu_jinxian/worldarena-dataengine-research/.conda/BWM/bin"
+POLL_SECONDS="${POLL_SECONDS:-300}"
+
+cd "$ROOT_DIR"
+mkdir -p logs
+exec >> logs/gap_eef_proxy_queue.log 2>&1
+
+printf '[%s] EEF proxy queue started. Poll interval: %ss\n' "$(date '+%F %T')" "$POLL_SECONDS"
+
+wait_for_session_to_exit() {
+  local session="$1"
+  while tmux has-session -t "$session" 2>/dev/null; do
+    printf '[%s] Waiting for session: %s\n' "$(date '+%F %T')" "$session"
+    sleep "$POLL_SECONDS"
+  done
+}
+
+launch_train() {
+  local session="$1"
+  local gpu="$2"
+  local variant="$3"
+  shift 3
+
+  local log_file="logs/${session}_gpu${gpu}.log"
+  local checkpoint_dir="checkpoints/place_dual_shoes_demo_clean_${variant}_seed0_50"
+
+  if [ -f "${checkpoint_dir}/200.ckpt" ]; then
+    printf '[%s] Skip %s: %s/200.ckpt already exists\n' "$(date '+%F %T')" "$session" "$checkpoint_dir"
+    return
+  fi
+
+  if tmux has-session -t "$session" 2>/dev/null; then
+    printf '[%s] Skip %s: tmux session already exists\n' "$(date '+%F %T')" "$session"
+    return
+  fi
+
+  printf '[%s] Launching %s on GPU %s -> %s\n' "$(date '+%F %T')" "$session" "$gpu" "$log_file"
+  tmux new-session -d -s "$session" \
+    "cd '$ROOT_DIR' && env PATH='$BWM_BIN':\$PATH WANDB_MODE=disabled bash train.sh place_dual_shoes demo_clean 50 0 '$gpu' 32 200 100 $* > '$log_file' 2>&1"
+}
+
+{
+  wait_for_session_to_exit gap_ablate_dino_only
+  launch_train gap_ablate_pi3_eef_region 1 pi3_eef_region \
+    latent_mode=pi3_eef_region \
+    use_future_loss=true \
+    future_target_mode=pi3_eef_region \
+    use_pi3_features=true \
+    policy.use_pi3_features=true \
+    checkpoint_tag=demo_clean_pi3_eef_region_seed0 \
+    exp_name=place_dual_shoes_demo_clean_50_pi3_eef_region_seed0 \
+    logging.name=place_dual_shoes_demo_clean_50_pi3_eef_region_seed0
+} &
+
+{
+  wait_for_session_to_exit gap_ablate_pi3_pooled
+  launch_train gap_ablate_pi3_non_eef_region 3 pi3_non_eef_region \
+    latent_mode=pi3_non_eef_region \
+    use_future_loss=true \
+    future_target_mode=pi3_non_eef_region \
+    use_pi3_features=true \
+    policy.use_pi3_features=true \
+    checkpoint_tag=demo_clean_pi3_non_eef_region_seed0 \
+    exp_name=place_dual_shoes_demo_clean_50_pi3_non_eef_region_seed0 \
+    logging.name=place_dual_shoes_demo_clean_50_pi3_non_eef_region_seed0
+} &
+
+wait
+
+printf '[%s] EEF proxy ablation batch launched.\n' "$(date '+%F %T')"

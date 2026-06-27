@@ -16,9 +16,9 @@ interval: 5
 model_3d: pi3
 dataset_obs_steps: ${n_obs_steps}
 use_pi3_features: true
-latent_mode: pi3_full  # pi3_full | dino_only | pi3_pooled | pi3_compressed | pi3_random_tokens | pi3_token_dropout | pi3_object_hand | pi3_background
+latent_mode: pi3_full  # pi3_full | dino_only | pi3_pooled | pi3_compressed | pi3_random_tokens | pi3_token_dropout | pi3_object_hand | pi3_background | pi3_eef_region | pi3_non_eef_region
 use_future_loss: true
-future_target_mode: pi3_full  # pi3_full | none | pi3_pooled | pi3_compressed | pi3_random_tokens | pi3_token_dropout | pi3_object_hand | pi3_background | interaction_state
+future_target_mode: pi3_full  # pi3_full | none | pi3_pooled | pi3_compressed | pi3_random_tokens | pi3_token_dropout | pi3_object_hand | pi3_background | pi3_eef_region | pi3_non_eef_region | interaction_state
 future_loss_weight: 0.1  # preserves the previous hard-coded Pi3 auxiliary loss weight
 
 latent:

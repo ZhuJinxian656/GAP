@@ -73,6 +73,20 @@ def default_variants(task: str, task_config: str, expert_data_num: int, seed: in
             log_path="logs/gap_ablate_pi3_dropout_gpu3.log",
             question="Full future Pi3 target with observation token dropout.",
         ),
+        Variant(
+            name="pi3_eef_region",
+            ckpt_setting=f"{task_config}_pi3_eef_region_seed{seed}",
+            checkpoint_dir=f"checkpoints/{task}_{task_config}_pi3_eef_region_seed{seed}_{expert_data_num}",
+            log_path="logs/gap_ablate_pi3_eef_region_gpu1.log",
+            question="EEF-projected hand-near Pi3 token proxy and matching future target.",
+        ),
+        Variant(
+            name="pi3_non_eef_region",
+            ckpt_setting=f"{task_config}_pi3_non_eef_region_seed{seed}",
+            checkpoint_dir=f"checkpoints/{task}_{task_config}_pi3_non_eef_region_seed{seed}_{expert_data_num}",
+            log_path="logs/gap_ablate_pi3_non_eef_region_gpu3.log",
+            question="Complement of the EEF-projected hand-near Pi3 proxy region.",
+        ),
     ]
 
 
@@ -232,7 +246,8 @@ def build_report(args: argparse.Namespace) -> str:
         "- `dino_only` tests whether any Pi3/future-latent signal matters beyond DINOv3 plus proprioception.",
         "- `no_future` tests whether future Pi3 supervision matters when full Pi3 observation tokens remain.",
         "- `pi3_pooled`, `pi3_compressed`, `pi3_random`, and `pi3_dropout` test whether dense full-scene Pi3 token structure is necessary.",
-        "- Current zarr/HDF5 data does not include object masks, hand masks, object pose, contact labels, or non-empty point clouds. Therefore these runs cannot directly prove an object-hand-interaction-region mechanism; they can only show whether full-scene dense geometry appears necessary.",
+        "- `pi3_eef_region` and `pi3_non_eef_region` use projected end-effector positions as a hand-near proxy/control. They are useful directional probes, not true object-hand masks.",
+        "- Current zarr/HDF5 data does not include object masks, hand masks, object pose, contact labels, or non-empty point clouds. Therefore these runs cannot directly prove an object-hand-interaction-region mechanism; they can only show whether full-scene dense geometry appears necessary and whether an EEF-near proxy is competitive.",
         "",
         "## Current Readout",
         "",

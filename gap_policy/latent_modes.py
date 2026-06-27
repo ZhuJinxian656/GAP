@@ -18,6 +18,8 @@ PI3_LATENT_MODES = (
     "pi3_token_dropout",
     "pi3_object_hand",
     "pi3_background",
+    "pi3_eef_region",
+    "pi3_non_eef_region",
 )
 
 FUTURE_TARGET_MODES = (
@@ -29,12 +31,16 @@ FUTURE_TARGET_MODES = (
     "pi3_token_dropout",
     "pi3_object_hand",
     "pi3_background",
+    "pi3_eef_region",
+    "pi3_non_eef_region",
     "interaction_state",
 )
 
 MASK_MODE_TO_KEY = {
     "pi3_object_hand": "pi3_object_hand_mask",
     "pi3_background": "pi3_background_mask",
+    "pi3_eef_region": "pi3_eef_region_mask",
+    "pi3_non_eef_region": "pi3_non_eef_region_mask",
 }
 
 

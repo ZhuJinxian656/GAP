@@ -735,7 +735,7 @@ class GAPPolicy(BasePolicy):
         mode = self.future_target_mode
         full_query = self.pi3_query_embed.reshape(-1, self.feature_dim)
         full_pos = self.pi3_query_pos_embed.reshape(-1, self.feature_dim)
-        if mode in ("pi3_full", "pi3_token_dropout", "pi3_object_hand", "pi3_background"):
+        if mode in ("pi3_full", "pi3_token_dropout") or mode_requires_mask(mode):
             query = full_query
             pos = full_pos
         elif mode == "pi3_pooled":

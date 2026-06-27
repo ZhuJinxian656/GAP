@@ -107,6 +107,18 @@ def main():
     background = make_policy(latent_mode="pi3_background")
     expect_key_error(lambda: background.encode_observations(obs), "pi3_background_mask")
 
+    eef_region = make_policy(latent_mode="pi3_eef_region")
+    expect_key_error(lambda: eef_region.encode_observations(obs), "pi3_eef_region_mask")
+    obs_with_eef = dict(obs)
+    obs_with_eef["pi3_eef_region_mask"] = torch.ones(2, 1, 20)
+    assert token_count(eef_region, obs_with_eef) == 1 + 1 + 6 + 20
+
+    non_eef_region = make_policy(latent_mode="pi3_non_eef_region")
+    expect_key_error(lambda: non_eef_region.encode_observations(obs), "pi3_non_eef_region_mask")
+    obs_with_non_eef = dict(obs)
+    obs_with_non_eef["pi3_non_eef_region_mask"] = torch.ones(2, 1, 20)
+    assert token_count(non_eef_region, obs_with_non_eef) == 1 + 1 + 6 + 20
+
     print("latent mode smoke tests passed")
 
 

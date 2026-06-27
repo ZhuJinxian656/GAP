@@ -29,6 +29,8 @@ def write_zarr(path: str, include_mask: bool = False) -> None:
         mask = np.zeros((steps, 1, 20), dtype="float32")
         mask[..., :5] = 1
         data.create_dataset("pi3_object_hand_mask", data=mask)
+        data.create_dataset("pi3_eef_region_mask", data=mask)
+        data.create_dataset("pi3_non_eef_region_mask", data=1.0 - mask)
     meta.create_dataset("episode_ends", data=np.array([steps], dtype=np.int64))
 
 
@@ -93,6 +95,34 @@ def main():
         masked_sample = masked[0]
         assert "pi3_object_hand_mask" in masked_sample["obs"]
         assert "future_pi3_object_hand_mask" in masked_sample
+
+        eef_masked = GAPDataset(
+            zarr_path=zarr_with_mask,
+            horizon=4,
+            pad_before=0,
+            pad_after=0,
+            max_train_episodes=1,
+            use_pi3_features=True,
+            latent_mode="pi3_eef_region",
+            future_target_mode="pi3_eef_region",
+        )
+        eef_sample = eef_masked[0]
+        assert "pi3_eef_region_mask" in eef_sample["obs"]
+        assert "future_pi3_eef_region_mask" in eef_sample
+
+        non_eef_masked = GAPDataset(
+            zarr_path=zarr_with_mask,
+            horizon=4,
+            pad_before=0,
+            pad_after=0,
+            max_train_episodes=1,
+            use_pi3_features=True,
+            latent_mode="pi3_non_eef_region",
+            future_target_mode="pi3_non_eef_region",
+        )
+        non_eef_sample = non_eef_masked[0]
+        assert "pi3_non_eef_region_mask" in non_eef_sample["obs"]
+        assert "future_pi3_non_eef_region_mask" in non_eef_sample
 
         print("dataset optional-field smoke tests passed")
     finally:

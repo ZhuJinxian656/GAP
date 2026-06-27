@@ -27,6 +27,8 @@ VARIANTS=(
   pi3_compressed
   pi3_random
   pi3_dropout
+  pi3_eef_region
+  pi3_non_eef_region
 )
 
 checkpoint_path_for() {

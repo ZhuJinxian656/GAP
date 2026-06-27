@@ -145,6 +145,28 @@ def main():
     set_test_normalizer(background, batch)
     expect_error(lambda: background.compute_loss(batch), KeyError, "future_pi3_background_mask")
 
+    eef_region = make_policy(use_future_loss=True, future_target_mode="pi3_eef_region")
+    set_test_normalizer(eef_region, batch)
+    expect_error(lambda: eef_region.compute_loss(batch), KeyError, "future_pi3_eef_region_mask")
+    eef_batch = {
+        "obs": batch["obs"],
+        "action": batch["action"],
+        "future_pi3_features": batch["future_pi3_features"],
+        "future_pi3_eef_region_mask": torch.ones(2, 1, 20),
+    }
+    assert_loss(eef_region, eef_batch, future_enabled=True)
+
+    non_eef_region = make_policy(use_future_loss=True, future_target_mode="pi3_non_eef_region")
+    set_test_normalizer(non_eef_region, batch)
+    expect_error(lambda: non_eef_region.compute_loss(batch), KeyError, "future_pi3_non_eef_region_mask")
+    non_eef_batch = {
+        "obs": batch["obs"],
+        "action": batch["action"],
+        "future_pi3_features": batch["future_pi3_features"],
+        "future_pi3_non_eef_region_mask": torch.ones(2, 1, 20),
+    }
+    assert_loss(non_eef_region, non_eef_batch, future_enabled=True)
+
     interaction = make_policy(use_future_loss=True, future_target_mode="interaction_state")
     set_test_normalizer(interaction, batch)
     expect_error(lambda: interaction.compute_loss(batch), NotImplementedError, "interaction_state")

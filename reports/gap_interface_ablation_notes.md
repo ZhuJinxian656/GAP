@@ -452,6 +452,10 @@ Current `latent_mode` support:
   `data/pi3_object_hand_mask` in zarr and is not runnable on the current data.
 - `pi3_background`: scaffolded with strict mask checks. It requires
   `data/pi3_background_mask` in zarr and is not runnable on the current data.
+- `pi3_eef_region`: implemented as an EEF-projected hand-near proxy. It
+  requires `data/pi3_eef_region_mask` in zarr.
+- `pi3_non_eef_region`: implemented as the complement control for the
+  EEF-projected proxy. It requires `data/pi3_non_eef_region_mask` in zarr.
 
 Current `future_target_mode` support:
 
@@ -470,6 +474,11 @@ Current `future_target_mode` support:
   checks derived from the last sampled timestep's zarr mask.
 - `pi3_background`: scaffolded with strict `future_pi3_background_mask` checks
   derived from the last sampled timestep's zarr mask.
+- `pi3_eef_region`: implemented with strict `future_pi3_eef_region_mask`
+  checks derived from the last sampled timestep's zarr mask.
+- `pi3_non_eef_region`: implemented with strict
+  `future_pi3_non_eef_region_mask` checks derived from the last sampled
+  timestep's zarr mask.
 - `interaction_state`: intentionally raises `NotImplementedError` in the policy
   unless a true `future_interaction_state` target exists. The current data lacks
   object pose/keypoints, so this mode cannot support a real object-centric
@@ -713,6 +722,59 @@ Current local conclusion:
   without additional mask/segmentation export.
 - It cannot support true object-centric triadic/interaction-state conclusions
   without object pose/keypoint export.
+- It can support an EEF-projected hand-near proxy because the data include
+  left/right EEF poses and camera calibration. This is not a true object-hand
+  region, but it is useful as a directional probe of whether Pi3/future signal
+  is concentrated near the manipulators.
+
+## 10.1 EEF-Projected Region Proxy
+
+Added proxy modes:
+
+- `pi3_eef_region`: keeps dense Pi3 token shape but zeros tokens outside a
+  disk around projected left/right end-effector positions.
+- `pi3_non_eef_region`: keeps the complement of that projected EEF-near
+  region.
+
+Mask generation command:
+
+```bash
+python scripts/generate_eef_region_masks.py \
+  --hdf5-root /data1/home/zhu_jinxian/project/robotwin/data/place_dual_shoes/demo_clean \
+  --zarr /data1/home/zhu_jinxian/project/GAP/data/place_dual_shoes-demo_clean-50-pi3-20-5.zarr \
+  --expert-data-num 50 \
+  --camera head_camera \
+  --token-grid 17,23 \
+  --radius-tokens 2.5 \
+  --overwrite
+```
+
+Generated zarr arrays:
+
+```text
+data/pi3_eef_region_mask:     shape=(11510, 1, 391), dtype=float32
+data/pi3_non_eef_region_mask: shape=(11510, 1, 391), dtype=float32
+```
+
+Observed statistics on the current 50-demo zarr:
+
+```text
+left_visible_fraction:   0.6325
+right_visible_fraction:  0.3972
+either_visible_fraction: 0.8626
+eef_token_fraction:      0.0483
+non_eef_token_fraction:  0.9517
+empty_eef_frames:        1604 / 11510
+```
+
+Interpretation:
+
+- `pi3_eef_region` close to vanilla would suggest that much of the useful
+  Pi3/future-latent signal is recoverable from a small hand-near proxy region.
+- `pi3_non_eef_region` close to vanilla while `pi3_eef_region` fails would
+  suggest the signal is not concentrated near projected manipulators.
+- Both are still proxy tests. Because object pose/masks are unavailable, they
+  cannot prove true object-hand interaction-region causality.
 
 ## 11. Engineering Scaffold Added
 
@@ -741,6 +803,10 @@ New or updated implementation files:
   modes.
 - `scripts/smoke_test_dataset_optional_fields.py`: synthetic zarr test for
   optional dataset fields and strict missing-mask errors.
+- `scripts/generate_eef_region_masks.py`: writes EEF-projected proxy masks
+  (`pi3_eef_region_mask`, `pi3_non_eef_region_mask`) into an existing zarr.
+- `scripts/launch_gap_eef_proxy_queue.sh`: waits for GPU slots and launches
+  the EEF proxy/control ablations in tmux.
 - `scripts/run_minimal_interface_smoke.sh`: one-command local smoke runner.
 - `configs/task_subsets/coupling_probe.yaml`: task-subset placeholder for later
   coupling-category sweeps. Categories are intentionally marked TODO unless
@@ -897,6 +963,22 @@ checkpoint already exists.
 | `gap_ablate_pi3_compressed` | 5 | compressed Pi3 observation plus compressed future target | `logs/gap_ablate_pi3_compressed_gpu5.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_compressed_seed0_50/` |
 | `gap_ablate_pi3_random` | 6 | random Pi3 token subset plus random-token future target | `logs/gap_ablate_pi3_random_gpu6.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_random_seed0_50/` |
 | `gap_ablate_pi3_dropout` | 7 | full Pi3 future target with token dropout in observation | `logs/gap_ablate_pi3_dropout_gpu7.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_dropout_seed0_50/` |
+
+The EEF-projected proxy/control batch is queued through
+`scripts/launch_gap_eef_proxy_queue.sh` in tmux session
+`gap_eef_proxy_queue`. It waits for two current training slots to free before
+starting:
+
+| Session | GPU | Variant | Log | Checkpoint directory |
+| --- | ---: | --- | --- | --- |
+| `gap_ablate_pi3_eef_region` | 1 | projected EEF-near Pi3 proxy plus matching future target | `logs/gap_ablate_pi3_eef_region_gpu1.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_eef_region_seed0_50/` |
+| `gap_ablate_pi3_non_eef_region` | 3 | complement of projected EEF-near Pi3 proxy plus matching future target | `logs/gap_ablate_pi3_non_eef_region_gpu3.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_non_eef_region_seed0_50/` |
+
+Queue status log:
+
+```bash
+tail -f logs/gap_eef_proxy_queue.log
+```
 
 Queue status log:
 
