@@ -861,3 +861,24 @@ Related motivation:
   relation interfaces.
 - This fork should first establish whether GAP's gains are scene-level or
   interaction-region-level before adding true object-centric future latents.
+
+## 15. Runtime Ablation Launch Log
+
+On 2026-06-27, three single-GPU 200-epoch ablations were launched in tmux on
+the 50-demo `place_dual_shoes/demo_clean` zarr. Each run writes to a separate
+checkpoint directory through `checkpoint_tag`, so it will not overwrite the
+vanilla baseline checkpoint.
+
+| Session | GPU | Variant | Log | Checkpoint directory |
+| --- | ---: | --- | --- | --- |
+| `gap_ablate_dino_only` | 1 | `latent_mode=dino_only`, no Pi3, no future loss | `logs/gap_ablate_dino_only_gpu1.log` | `checkpoints/place_dual_shoes_demo_clean_dino_only_seed0_50/` |
+| `gap_ablate_no_future` | 2 | full Pi3 observation, future loss disabled | `logs/gap_ablate_no_future_gpu2.log` | `checkpoints/place_dual_shoes_demo_clean_no_future_seed0_50/` |
+| `gap_ablate_pi3_pooled` | 3 | pooled Pi3 observation plus pooled future target | `logs/gap_ablate_pi3_pooled_gpu3.log` | `checkpoints/place_dual_shoes_demo_clean_pi3_pooled_seed0_50/` |
+
+Follow-up eval commands after epoch 200 checkpoints exist:
+
+```bash
+bash eval.sh place_dual_shoes demo_clean demo_clean_dino_only_seed0 50 200 1 0 10
+bash eval.sh place_dual_shoes demo_clean demo_clean_no_future_seed0 50 200 2 0 10
+bash eval.sh place_dual_shoes demo_clean demo_clean_pi3_pooled_seed0 50 200 3 0 10
+```
