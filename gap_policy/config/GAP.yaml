@@ -18,7 +18,7 @@ dataset_obs_steps: ${n_obs_steps}
 use_pi3_features: true
 latent_mode: pi3_full  # pi3_full | dino_only | pi3_pooled | pi3_compressed | pi3_random_tokens | pi3_token_dropout | pi3_object_hand | pi3_background | pi3_eef_region | pi3_non_eef_region
 use_future_loss: true
-future_target_mode: pi3_full  # pi3_full | none | pi3_pooled | pi3_compressed | pi3_random_tokens | pi3_token_dropout | pi3_object_hand | pi3_background | pi3_eef_region | pi3_non_eef_region | interaction_state
+future_target_mode: pi3_full  # pi3_full | none | pi3_delta | pi3_changed_tokens | pi3_delta_changed_tokens | pi3_pooled | pi3_compressed | pi3_random_tokens | pi3_token_dropout | pi3_object_hand | pi3_background | pi3_eef_region | pi3_non_eef_region | interaction_state
 future_loss_weight: 0.1  # preserves the previous hard-coded Pi3 auxiliary loss weight
 
 latent:
@@ -33,6 +33,9 @@ future:
   pi3_num_compressed_tokens: 16
   pi3_pool_grid: [4, 4]
   interaction_loss_weight: 1.0
+  changed_token_percentile: 90
+  changed_token_topk: null
+  changed_token_stopgrad_mask: true
 
 policy:
   _target_: gap_policy.policy.gap.GAPPolicy

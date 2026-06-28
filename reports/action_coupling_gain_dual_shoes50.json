@@ -1,0 +1,17 @@
+{
+  "zarr": "data/place_dual_shoes-demo_clean-50-pi3-20-5.zarr",
+  "target": "pooled_delta",
+  "samples": 512,
+  "train_samples": 410,
+  "test_samples": 102,
+  "target_dim": 1024,
+  "current_feature_dim": 1038,
+  "action_chunk_dim": 280,
+  "ridge_alpha": 1.0,
+  "train_ratio": 0.8,
+  "mse_current_only": 0.00040322863820679166,
+  "mse_current_action": 0.00033854653146725547,
+  "coupling_gain": 6.46821067395362e-05,
+  "relative_gain": 0.1604104981907675,
+  "interpretation": "Positive coupling_gain means the expert action chunk improved future-delta prediction; negative or near-zero gain means the target is mostly predictable from current state/features."
+}

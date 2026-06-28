@@ -219,7 +219,34 @@ Eval rollouts per variant: `50`
 | `pi3_eef_region` | 0.12 | 6/50 | +0.04 |
 | `pi3_non_eef_region` | 0.10 | 5/50 | +0.02 |
 
-## Current Interpretation
+## Eval100 Trajectory Update
+
+After the eval50 mechanism pass, we trained and evaluated two trajectory-supervision variants:
+
+| variant | future target | eval100 |
+| --- | --- | ---: |
+| `vanilla` | full future Pi3 scene | 8/100 |
+| `delta_future` | `z_future - z_current` | 8/100 |
+| `changed_token_future` | full future target masked to high-delta tokens | 9/100 |
+| `no_future` | no future loss | 8/100 |
+| `pi3_pooled` | pooled Pi3 future target | 16/100 |
+| `pi3_eef_region` | EEF-projected region future target | 18/100 |
+| `dino_only` | no Pi3 observation or future target | 24/100 |
+
+Full eval100 table and analysis:
+
+```text
+reports/dual_shoes_trajectory_results_table.md
+reports/dual_shoes_trajectory_eval100_analysis.md
+```
+
+Updated readout:
+
+> The current eval100 result does not support the narrow hypothesis that raw trajectory-coupled future targets are better than full-scene future Pi3 supervision. `delta_future` matches vanilla at `8/100`, and `changed_token_future` is only `9/100`. The stronger positive signal is spatial or bottlenecked supervision: `pi3_eef_region` is `18/100`, `pi3_pooled` is `16/100`, and `dino_only` remains best at `24/100`.
+
+The idea should be refined from "predict action-induced Pi3 changes" to "localize future/action supervision to true task-causal object-hand regions while preserving enough absolute geometry." True object/robot masks from RoboTwin/SAPIEN replay are now a higher-priority next step than training more raw delta variants.
+
+## Earlier Eval50 Interpretation
 
 Strongest defensible conclusion:
 

@@ -462,6 +462,9 @@ class GAPPolicy(BasePolicy):
         self.future_pool_grid = parse_pair(self.future_cfg.get("pi3_pool_grid"), self.latent_pool_grid)
         self.latent_num_compressed_tokens = int(self.latent_cfg.get("pi3_num_compressed_tokens", 16))
         self.future_num_compressed_tokens = int(self.future_cfg.get("pi3_num_compressed_tokens", 16))
+        self.changed_token_percentile = float(self.future_cfg.get("changed_token_percentile", 90.0))
+        self.changed_token_topk = self.future_cfg.get("changed_token_topk", None)
+        self.changed_token_stopgrad_mask = bool(self.future_cfg.get("changed_token_stopgrad_mask", True))
         self.pi3_random_num_tokens = int(self.latent_cfg.get("pi3_random_num_tokens", 64))
         self.pi3_random_seed = int(self.latent_cfg.get("pi3_random_seed", 0))
         self.pi3_token_dropout_rate = float(self.latent_cfg.get("pi3_token_dropout_rate", 0.0))
@@ -735,7 +738,13 @@ class GAPPolicy(BasePolicy):
         mode = self.future_target_mode
         full_query = self.pi3_query_embed.reshape(-1, self.feature_dim)
         full_pos = self.pi3_query_pos_embed.reshape(-1, self.feature_dim)
-        if mode in ("pi3_full", "pi3_token_dropout") or mode_requires_mask(mode):
+        if mode in (
+            "pi3_full",
+            "pi3_delta",
+            "pi3_changed_tokens",
+            "pi3_delta_changed_tokens",
+            "pi3_token_dropout",
+        ) or mode_requires_mask(mode):
             query = full_query
             pos = full_pos
         elif mode == "pi3_pooled":
@@ -764,6 +773,17 @@ class GAPPolicy(BasePolicy):
         if mode == "pi3_full":
             target = future_pi3
             mask = None
+        elif mode == "pi3_delta":
+            target = future_pi3 - self._current_pi3_from_batch(batch, future_pi3)
+            mask = None
+        elif mode == "pi3_changed_tokens":
+            current_pi3 = self._current_pi3_from_batch(batch, future_pi3)
+            target = future_pi3
+            mask = self._changed_token_mask(current_pi3, future_pi3)
+        elif mode == "pi3_delta_changed_tokens":
+            current_pi3 = self._current_pi3_from_batch(batch, future_pi3)
+            target = future_pi3 - current_pi3
+            mask = self._changed_token_mask(current_pi3, future_pi3)
         elif mode == "pi3_token_dropout":
             target = future_pi3
             mask = None
@@ -795,6 +815,55 @@ class GAPPolicy(BasePolicy):
             B, N_views, num_patches, pi3_dim = target.shape
             target = target.permute(0, 2, 1, 3).reshape(B, num_patches, N_views * pi3_dim)
         return target, mask
+
+    def _current_pi3_from_batch(self, batch: Dict[str, Any], future_pi3: torch.Tensor) -> torch.Tensor:
+        obs = batch.get("obs")
+        if not isinstance(obs, dict) or "pi3_features" not in obs:
+            raise KeyError(
+                f"future_target_mode={self.future_target_mode!r} requires current "
+                "batch['obs']['pi3_features'] to compute future-current deltas."
+            )
+        current_pi3 = obs["pi3_features"]
+        if current_pi3.shape != future_pi3.shape:
+            raise ValueError(
+                "Current and future Pi3 feature shapes must match for trajectory-coupled "
+                f"future targets, got current={tuple(current_pi3.shape)} and "
+                f"future={tuple(future_pi3.shape)}."
+            )
+        return current_pi3
+
+    def _changed_token_mask(self, current_pi3: torch.Tensor, future_pi3: torch.Tensor) -> torch.Tensor:
+        if current_pi3.ndim != 4 or future_pi3.ndim != 4:
+            raise ValueError(
+                "Changed-token future modes require Pi3 features shaped [B, V, N, D], "
+                f"got current={tuple(current_pi3.shape)} future={tuple(future_pi3.shape)}."
+            )
+        delta_norm = torch.linalg.vector_norm(future_pi3 - current_pi3, dim=-1)
+        if self.changed_token_stopgrad_mask:
+            delta_norm = delta_norm.detach()
+        batch, views, tokens = delta_norm.shape
+        flat = delta_norm.reshape(batch, views * tokens)
+
+        if self.changed_token_topk is not None:
+            topk = int(self.changed_token_topk)
+            if topk <= 0:
+                raise ValueError("future.changed_token_topk must be positive when set.")
+            topk = min(topk, flat.shape[1])
+            selected = torch.topk(flat, k=topk, dim=1).indices
+            mask_flat = torch.zeros_like(flat, dtype=future_pi3.dtype)
+            mask_flat.scatter_(1, selected, 1.0)
+        else:
+            percentile = min(max(float(self.changed_token_percentile), 0.0), 100.0)
+            threshold = torch.quantile(flat.float(), percentile / 100.0, dim=1, keepdim=True)
+            mask_flat = (flat >= threshold.to(flat.dtype)).to(dtype=future_pi3.dtype)
+
+        empty = mask_flat.sum(dim=1, keepdim=True) == 0
+        if empty.any():
+            selected = torch.argmax(flat, dim=1, keepdim=True)
+            fallback = torch.zeros_like(mask_flat)
+            fallback.scatter_(1, selected, 1.0)
+            mask_flat = torch.where(empty, fallback, mask_flat)
+        return mask_flat.reshape(batch, views, tokens)
 
     def _future_loss(
         self,

@@ -25,6 +25,9 @@ PI3_LATENT_MODES = (
 FUTURE_TARGET_MODES = (
     "pi3_full",
     "none",
+    "pi3_delta",
+    "pi3_changed_tokens",
+    "pi3_delta_changed_tokens",
     "pi3_pooled",
     "pi3_compressed",
     "pi3_random_tokens",
