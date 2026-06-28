@@ -1,20 +1,24 @@
 # GAP Interface Ablation Result Summary
 
-Generated: 2026-06-27 19:14:37
+Generated: 2026-06-28 14:30:20
 
 Task: `place_dual_shoes`  Config: `demo_clean`  Demos: `50`  Seed: `0`  Checkpoint: `200`
 
-| variant            | checkpoint             | latest epoch/loss | eval success | result file                                                               | question                                                            |
-| ------------------ | ---------------------- | ----------------- | ------------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| vanilla            | 200 ready              | not found         | 0.300        | results/place_dual_shoes/GAP/demo_clean/demo_clean/seed_0/200/_result.txt | Full Pi3 scene tokens plus full future Pi3 latent target.           |
-| dino_only          | 100 saved; 200 pending | 120 / 0.0002      | pending      | pending                                                                   | No Pi3 observation and no future latent supervision.                |
-| no_future          | 200 pending            | 56 / 0.0008       | pending      | pending                                                                   | Full Pi3 observation, but future latent loss disabled.              |
-| pi3_pooled         | 200 pending            | 68 / 0.0007       | pending      | pending                                                                   | Pooled Pi3 tokens and pooled future target.                         |
-| pi3_compressed     | 200 pending            | 20 / 0.0047       | pending      | pending                                                                   | Compressed Pi3 bottleneck and compressed future target.             |
-| pi3_random         | 200 pending            | 18 / 0.0041       | pending      | pending                                                                   | Random Pi3 token subset and random-token future target.             |
-| pi3_dropout        | 200 pending            | 16 / 0.0040       | pending      | pending                                                                   | Full future Pi3 target with observation token dropout.              |
-| pi3_eef_region     | 200 pending            | not found         | pending      | pending                                                                   | EEF-projected hand-near Pi3 token proxy and matching future target. |
-| pi3_non_eef_region | 200 pending            | not found         | pending      | pending                                                                   | Complement of the EEF-projected hand-near Pi3 proxy region.         |
+Rollouts per variant: `10`
+
+Results dir: `results`
+
+| variant            | checkpoint | latest epoch/loss | successes | eval success | delta vs vanilla | result file                                                                                        | question                                                            |
+| ------------------ | ---------- | ----------------- | --------- | ------------ | ---------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| vanilla            | 200 ready  | not found         | 3/10      | 0.300        | +0.000           | results/place_dual_shoes/GAP/demo_clean/demo_clean/seed_0/200/_result.txt                          | Full Pi3 scene tokens plus full future Pi3 latent target.           |
+| dino_only          | 200 ready  | 200 / 0.0000      | 2/10      | 0.200        | -0.100           | results/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_seed0/seed_0/200/_result.txt          | No Pi3 observation and no future latent supervision.                |
+| no_future          | 200 ready  | 200 / 0.0000      | 0/10      | 0.000        | -0.300           | results/place_dual_shoes/GAP/demo_clean/demo_clean_no_future_seed0/seed_0/200/_result.txt          | Full Pi3 observation, but future latent loss disabled.              |
+| pi3_pooled         | 200 ready  | 200 / 0.0000      | 2/10      | 0.200        | -0.100           | results/place_dual_shoes/GAP/demo_clean/demo_clean_pi3_pooled_seed0/seed_0/200/_result.txt         | Pooled Pi3 tokens and pooled future target.                         |
+| pi3_compressed     | 200 ready  | 200 / 0.0001      | 0/10      | 0.000        | -0.300           | results/place_dual_shoes/GAP/demo_clean/demo_clean_pi3_compressed_seed0/seed_0/200/_result.txt     | Compressed Pi3 bottleneck and compressed future target.             |
+| pi3_random         | 200 ready  | 200 / 0.0001      | 1/10      | 0.100        | -0.200           | results/place_dual_shoes/GAP/demo_clean/demo_clean_pi3_random_seed0/seed_0/200/_result.txt         | Random Pi3 token subset and random-token future target.             |
+| pi3_dropout        | 200 ready  | 200 / 0.0002      | 0/10      | 0.000        | -0.300           | results/place_dual_shoes/GAP/demo_clean/demo_clean_pi3_dropout_seed0/seed_0/200/_result.txt        | Full future Pi3 target with observation token dropout.              |
+| pi3_eef_region     | 200 ready  | 200 / 0.0001      | 2/10      | 0.200        | -0.100           | results/place_dual_shoes/GAP/demo_clean/demo_clean_pi3_eef_region_seed0/seed_0/200/_result.txt     | EEF-projected hand-near Pi3 token proxy and matching future target. |
+| pi3_non_eef_region | 200 ready  | 200 / 0.0002      | 1/10      | 0.100        | -0.200           | results/place_dual_shoes/GAP/demo_clean/demo_clean_pi3_non_eef_region_seed0/seed_0/200/_result.txt | Complement of the EEF-projected hand-near Pi3 proxy region.         |
 
 ## Interpretation Guardrails
 
@@ -26,5 +30,11 @@ Task: `place_dual_shoes`  Config: `demo_clean`  Demos: `50`  Seed: `0`  Checkpoi
 
 ## Current Readout
 
-- Vanilla baseline success rate is `0.300`.
-- Pending ablation evals: `dino_only, no_future, pi3_pooled, pi3_compressed, pi3_random, pi3_dropout, pi3_eef_region, pi3_non_eef_region`.
+- Vanilla baseline success rate is `0.300` (3/10).
+- All configured ablation eval results are present.
+- Best observed variant is `vanilla` at `0.300` (3/10).
+- `dino_only` below vanilla is consistent with Pi3/future-latent helping, but by itself does not identify whether the useful signal is full-scene geometry.
+- `no_future` below vanilla suggests future-latent supervision may matter within the Pi3 setup, but this is not enough to prove a full-scene geometry mechanism.
+- `pi3_eef_region` and `pi3_non_eef_region` are close, so the EEF-near proxy is only a weak directional signal in this single-task run.
+- `pi3_pooled` remaining competitive weakens a strict dense full-scene token requirement.
+- This is still one task, one seed, and 50 demos; it is useful evidence for experiment direction, not a paper-scale conclusion.

@@ -156,6 +156,26 @@ def fmt_epoch_loss(epoch: Optional[int], loss: Optional[float]) -> str:
     return f"{epoch} / {fmt_float(loss)}"
 
 
+def fmt_success_count(rate: Optional[float], test_num: int) -> str:
+    if rate is None:
+        return "pending"
+    return f"{round(rate * test_num)}/{test_num}"
+
+
+def fmt_delta(rate: Optional[float], baseline: Optional[float]) -> str:
+    if rate is None or baseline is None:
+        return "pending"
+    return f"{rate - baseline:+.3f}"
+
+
+def path_for_report(path: Path, root: Path) -> str:
+    if not path.exists():
+        return "pending"
+    if path.is_relative_to(root):
+        return str(path.relative_to(root))
+    return str(path)
+
+
 def saved_checkpoints(checkpoint_dir: Path) -> list[int]:
     if not checkpoint_dir.is_dir():
         return []
@@ -179,6 +199,7 @@ def checkpoint_status(checkpoint_dir: Path, target_checkpoint: int) -> str:
 
 def result_file_for(
     root: Path,
+    results_dir: Path,
     task: str,
     policy: str,
     task_config: str,
@@ -187,8 +208,7 @@ def result_file_for(
     checkpoint: int,
 ) -> Path:
     return (
-        root
-        / "results"
+        results_dir
         / task
         / policy
         / task_config
@@ -215,22 +235,29 @@ def markdown_table(rows: Iterable[list[str]]) -> str:
 
 def build_report(args: argparse.Namespace) -> str:
     root = Path(args.root).resolve()
+    results_dir = Path(args.results_dir)
+    if not results_dir.is_absolute():
+        results_dir = root / results_dir
     variants = default_variants(args.task, args.task_config, args.expert_data_num, args.seed)
 
     rows = [[
         "variant",
         "checkpoint",
         "latest epoch/loss",
+        "successes",
         "eval success",
+        "delta vs vanilla",
         "result file",
         "question",
     ]]
 
     rates: dict[str, Optional[float]] = {}
+    row_data = []
     for variant in variants:
         ckpt_dir = root / variant.checkpoint_dir
         result_path = result_file_for(
             root=root,
+            results_dir=results_dir,
             task=args.task,
             policy=args.policy,
             task_config=args.task_config,
@@ -241,17 +268,27 @@ def build_report(args: argparse.Namespace) -> str:
         epoch, loss = latest_epoch_loss_from_logs(candidate_logs(root, variant))
         rate = parse_success_rate(result_path)
         rates[variant.name] = rate
+        row_data.append((variant, ckpt_dir, result_path, epoch, loss, rate))
 
+    baseline = rates.get("vanilla")
+    for variant, ckpt_dir, result_path, epoch, loss, rate in row_data:
         rows.append([
             variant.name,
             checkpoint_status(ckpt_dir, args.checkpoint),
             fmt_epoch_loss(epoch, loss),
+            fmt_success_count(rate, args.test_num),
             fmt_float(rate, digits=3),
-            str(result_path.relative_to(root)) if result_path.exists() else "pending",
+            fmt_delta(rate, baseline),
+            path_for_report(result_path, root),
             variant.question,
         ])
 
-    baseline = rates.get("vanilla")
+    completed_rates = {name: rate for name, rate in rates.items() if rate is not None}
+    best_name = None
+    best_rate = None
+    if completed_rates:
+        best_name, best_rate = max(completed_rates.items(), key=lambda item: item[1])
+
     lines = [
         "# GAP Interface Ablation Result Summary",
         "",
@@ -259,6 +296,10 @@ def build_report(args: argparse.Namespace) -> str:
         "",
         f"Task: `{args.task}`  Config: `{args.task_config}`  Demos: `{args.expert_data_num}`  "
         f"Seed: `{args.seed}`  Checkpoint: `{args.checkpoint}`",
+        "",
+        f"Rollouts per variant: `{args.test_num}`",
+        "",
+        f"Results dir: `{results_dir.relative_to(root) if results_dir.is_relative_to(root) else results_dir}`",
         "",
         markdown_table(rows),
         "",
@@ -277,14 +318,80 @@ def build_report(args: argparse.Namespace) -> str:
     if baseline is None:
         lines.append("- Baseline eval is missing, so no comparison is available yet.")
     else:
-        lines.append(f"- Vanilla baseline success rate is `{baseline:.3f}`.")
+        lines.append(
+            f"- Vanilla baseline success rate is `{baseline:.3f}` "
+            f"({fmt_success_count(baseline, args.test_num)})."
+        )
 
     pending = [name for name, rate in rates.items() if rate is None and name != "vanilla"]
     if pending:
         lines.append(f"- Pending ablation evals: `{', '.join(pending)}`.")
     else:
         lines.append("- All configured ablation eval results are present.")
-        lines.append("- Compare each ablation against vanilla before making claims about full-scene Pi3/future latent necessity.")
+        if best_name is not None and best_rate is not None:
+            lines.append(
+                f"- Best observed variant is `{best_name}` at `{best_rate:.3f}` "
+                f"({fmt_success_count(best_rate, args.test_num)})."
+            )
+        dino = rates.get("dino_only")
+        no_future = rates.get("no_future")
+        eef = rates.get("pi3_eef_region")
+        non_eef = rates.get("pi3_non_eef_region")
+        pooled = rates.get("pi3_pooled")
+        if dino is not None and baseline is not None:
+            if dino >= baseline:
+                lines.append(
+                    "- `dino_only` being at or above vanilla means this run does not support a claim "
+                    "that full-scene Pi3 observation plus future latent is the dominant source of success."
+                )
+            else:
+                lines.append(
+                    "- `dino_only` below vanilla is consistent with Pi3/future-latent helping, "
+                    "but by itself does not identify whether the useful signal is full-scene geometry."
+                )
+        if no_future is not None and baseline is not None:
+            if no_future < baseline:
+                lines.append(
+                    "- `no_future` below vanilla suggests future-latent supervision may matter within the Pi3 setup, "
+                    "but this is not enough to prove a full-scene geometry mechanism."
+                )
+            else:
+                lines.append(
+                    "- `no_future` at or above vanilla weakens the case that future-latent supervision is essential "
+                    "in this run."
+                )
+        if eef is not None and non_eef is not None:
+            if abs(eef - non_eef) <= (1.0 / args.test_num):
+                lines.append(
+                    "- `pi3_eef_region` and `pi3_non_eef_region` are close, so the EEF-near proxy is only a weak "
+                    "directional signal in this single-task run."
+                )
+            elif eef > non_eef:
+                lines.append(
+                    "- `pi3_eef_region` above `pi3_non_eef_region` is directionally consistent with an interaction-region "
+                    "hypothesis, but it remains an EEF proxy rather than a true object-hand mask."
+                )
+            else:
+                lines.append(
+                    "- `pi3_non_eef_region` above `pi3_eef_region` does not support the EEF-near proxy as the main useful region."
+                )
+        if pooled is not None and baseline is not None:
+            if pooled >= baseline - (1.0 / args.test_num):
+                lines.append(
+                    "- `pi3_pooled` remaining competitive weakens a strict dense full-scene token requirement."
+                )
+            else:
+                lines.append(
+                    "- `pi3_pooled` below vanilla is consistent with some loss from compressing Pi3 token structure."
+                )
+        elif pooled is not None:
+            lines.append(
+                "- `pi3_pooled` should be compared against vanilla before making dense-token claims."
+            )
+        lines.append(
+            "- This is still one task, one seed, and 50 demos; it is useful evidence for experiment direction, "
+            "not a paper-scale conclusion."
+        )
 
     return "\n".join(lines) + "\n"
 
@@ -298,6 +405,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint", type=int, default=200)
     parser.add_argument("--policy", default="GAP")
+    parser.add_argument("--results-dir", default="results")
+    parser.add_argument("--test-num", type=int, default=10)
     parser.add_argument("--output", default="reports/gap_ablation_result_summary.md")
     args = parser.parse_args()
 

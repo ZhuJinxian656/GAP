@@ -18,11 +18,13 @@ data/
 data_smoke/
 eval_result/
 results/
+results_eval*/
 results_smoke_eval/
 logs/
 reports/*
 !reports/gap_interface_ablation_notes.md
 !reports/gap_ablation_result_summary.md
+!reports/gap_ablation_eval50_summary.md
 wandb/
 outputs/
 multirun/
