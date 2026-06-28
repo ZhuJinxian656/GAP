@@ -26,6 +26,7 @@ reports/*
 !reports/gap_ablation_result_summary.md
 !reports/gap_ablation_eval50_summary.md
 !reports/gap_mechanism_readout.md
+!reports/gap_research_handoff.md
 wandb/
 outputs/
 multirun/
