@@ -18,6 +18,7 @@ data/
 data_smoke/
 eval_result/
 results/
+results_*/
 results_eval*/
 results_smoke_eval/
 logs/
@@ -27,6 +28,7 @@ reports/*
 !reports/gap_ablation_eval50_summary.md
 !reports/gap_mechanism_readout.md
 !reports/gap_research_handoff.md
+!reports/flow_interaction_eval100_summary.md
 wandb/
 outputs/
 multirun/

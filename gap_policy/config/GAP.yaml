@@ -110,6 +110,16 @@ policy:
   n_action_steps: ${n_action_steps}
   n_obs_steps: ${n_obs_steps}
 
+  # Generative policy objective
+  generative_mode: diffusion  # diffusion | flow_matching
+  flow_matching:
+    prediction_type: velocity
+    source_mode: hold  # hold | previous_action | zeros | noise
+    lambda_min: 0.0
+    lambda_max: 1.0
+    num_inference_steps: null  # null reuses policy.num_inference_steps
+    action_source_noise_std: 0.0
+
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     num_train_timesteps: 100

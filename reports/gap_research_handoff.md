@@ -246,6 +246,58 @@ Updated readout:
 
 The idea should be refined from "predict action-induced Pi3 changes" to "localize future/action supervision to true task-causal object-hand regions while preserving enough absolute geometry." True object/robot masks from RoboTwin/SAPIEN replay are now a higher-priority next step than training more raw delta variants.
 
+## Flow Matching Interaction Eval100
+
+After the trajectory update, we implemented a flow-matching action generator and reused the action-conditioned DINO interaction readout inside both diffusion and flow objectives.
+
+Validation gates passed:
+
+| gate | result |
+| --- | --- |
+| synthetic flow/action_uv smoke | passed |
+| real zarr debug train, `flow + DINO-only` | final debug loss `0.0004` |
+| real zarr debug train, `flow + action_uv` | final debug loss `0.0064` |
+
+The real-zarr checks used `setting=demo_clean`, because the available local zarr is `data/place_dual_shoes-demo_clean-50-pi3-20-5.zarr`.
+
+Formal six-way training completed at epoch 200:
+
+| variant | epoch 200 train loss |
+| --- | ---: |
+| diffusion + DINO-only | 0.0009 |
+| diffusion + current_eef | 0.0009 |
+| diffusion + action_uv | 0.0604 |
+| flow + DINO-only | 0.0005 |
+| flow + current_eef | 0.0005 |
+| flow + action_uv | 0.0252 |
+
+Eval100 results:
+
+| variant | eval100 |
+| --- | ---: |
+| diffusion + DINO-only | 2/100 |
+| diffusion + current_eef | 4/100 |
+| diffusion + action_uv | 3/100 |
+| flow + DINO-only | 1/100 |
+| flow + current_eef | 1/100 |
+| flow + action_uv | 1/100 |
+
+Full writeup:
+
+```text
+reports/flow_interaction_eval100_summary.md
+```
+
+Video/result root:
+
+```text
+results_dual_shoes_flow_interaction_eval100
+```
+
+Updated readout:
+
+> This eval100 pass does **not** support the claim that flow intermediate actions induce a useful interaction field. `flow + action_uv` is `1/100`, below `diffusion + action_uv` at `3/100`, and tied with `flow + DINO-only` at `1/100`.
+
 ## Earlier Eval50 Interpretation
 
 Strongest defensible conclusion:

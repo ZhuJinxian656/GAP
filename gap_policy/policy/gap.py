@@ -420,6 +420,8 @@ class GAPPolicy(BasePolicy):
         n_action_steps,
         n_obs_steps,
         num_inference_steps=None,
+        generative_mode="diffusion",
+        flow_matching=None,
         # Feature dimensions (from pre-extracted features)
         dinov3_feature_dim=1024,  # DinoV3 ViT-L/16 feature dimension
         dinov3_num_views=1,       # Number of camera views for DinoV3
@@ -743,7 +745,50 @@ class GAPPolicy(BasePolicy):
             num_inference_steps = noise_scheduler.config.num_train_timesteps
         self.num_inference_steps = num_inference_steps
 
+        self.generative_mode = str(generative_mode).lower()
+        if self.generative_mode not in ("diffusion", "flow_matching"):
+            raise ValueError(
+                f"Unsupported generative_mode={generative_mode!r}. "
+                "Expected 'diffusion' or 'flow_matching'."
+            )
+        self.flow_cfg = self._to_plain_dict(flow_matching)
+        self.flow_source_mode = str(self.flow_cfg.get("source_mode", "hold")).lower()
+        if self.flow_source_mode not in ("hold", "previous_action", "zeros", "noise"):
+            raise ValueError(
+                f"Unsupported flow_matching.source_mode={self.flow_source_mode!r}. "
+                "Expected hold, previous_action, zeros, or noise."
+            )
+        self.flow_lambda_min = float(self.flow_cfg.get("lambda_min", 0.0))
+        self.flow_lambda_max = float(self.flow_cfg.get("lambda_max", 1.0))
+        if not self.flow_lambda_min < self.flow_lambda_max:
+            raise ValueError(
+                "flow_matching.lambda_min must be smaller than flow_matching.lambda_max, "
+                f"got {self.flow_lambda_min} and {self.flow_lambda_max}."
+            )
+        flow_num_inference_steps = self.flow_cfg.get("num_inference_steps", None)
+        if flow_num_inference_steps is None:
+            flow_num_inference_steps = self.num_inference_steps
+        self.flow_num_inference_steps = int(flow_num_inference_steps)
+        if self.flow_num_inference_steps <= 0:
+            raise ValueError("flow_matching.num_inference_steps must be positive.")
+        self.flow_action_source_noise_std = float(self.flow_cfg.get("action_source_noise_std", 0.0))
+        self.flow_prediction_type = str(self.flow_cfg.get("prediction_type", "velocity")).lower()
+        if self.flow_prediction_type != "velocity":
+            raise ValueError(
+                f"Unsupported flow_matching.prediction_type={self.flow_prediction_type!r}. "
+                "Only velocity prediction is implemented."
+            )
+
         cprint("[GAP] Configuration:", "cyan")
+        cprint(f"  Generative mode: {self.generative_mode}", "cyan")
+        if self.generative_mode == "flow_matching":
+            cprint(
+                "  Flow matching: "
+                f"source={self.flow_source_mode}, "
+                f"lambda=[{self.flow_lambda_min}, {self.flow_lambda_max}], "
+                f"steps={self.flow_num_inference_steps}",
+                "cyan",
+            )
         cprint(f"  Vision feature dim: {vision_feat_dim}", "cyan")
         cprint(f"  State embed dim: {state_embed_dim}", "cyan")
         cprint(f"  Triadic token: {self.use_triadic_token} ({triadic_mode}, dim={self.triadic_dim})", "cyan")
@@ -939,6 +984,121 @@ class GAPPolicy(BasePolicy):
         timestep = timestep.to(device=device, dtype=dtype).reshape(batch_size)
         max_train_timesteps = float(getattr(self.noise_scheduler.config, "num_train_timesteps", 100))
         return (1.0 - timestep / max(max_train_timesteps, 1.0)).clamp(0.0, 1.0)
+
+    def _flow_lambda_to_timestep(
+        self,
+        flow_lambda: torch.Tensor,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if flow_lambda.ndim == 0:
+            flow_lambda = flow_lambda.expand(batch_size)
+        progress = flow_lambda.to(device=device, dtype=dtype).reshape(batch_size).clamp(0.0, 1.0)
+        max_train_timesteps = float(getattr(self.noise_scheduler.config, "num_train_timesteps", 100))
+        return (1.0 - progress) * max_train_timesteps
+
+    def _sample_flow_lambdas(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        span = self.flow_lambda_max - self.flow_lambda_min
+        return torch.rand(batch_size, device=device, dtype=dtype) * span + self.flow_lambda_min
+
+    def _agent_pos_action_source(
+        self,
+        agent_pos: torch.Tensor,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        agent_pos = agent_pos.to(device=device, dtype=dtype)
+        if agent_pos.ndim != 2 or agent_pos.shape[0] != batch_size:
+            raise ValueError(
+                "agent_pos source must be shaped [B, state_dim], "
+                f"got {tuple(agent_pos.shape)} for batch_size={batch_size}."
+            )
+        if agent_pos.shape[-1] != self.action_dim:
+            raise ValueError(
+                "flow_matching.source_mode='hold' requires agent_pos dim to match action_dim, "
+                f"got agent_pos={agent_pos.shape[-1]} and action_dim={self.action_dim}."
+            )
+        return agent_pos.unsqueeze(1).expand(batch_size, self.horizon, self.action_dim).clone()
+
+    def _flow_source_actions(
+        self,
+        obs_dict: Optional[Dict[str, torch.Tensor]],
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        generator=None,
+    ) -> torch.Tensor:
+        mode = self.flow_source_mode
+        if mode == "zeros":
+            source = torch.zeros(batch_size, self.horizon, self.action_dim, device=device, dtype=dtype)
+        elif mode == "noise":
+            source = torch.randn(
+                batch_size,
+                self.horizon,
+                self.action_dim,
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
+        elif mode == "previous_action":
+            source = None
+            if obs_dict is not None:
+                for key in ("previous_action", "prev_action", "last_action"):
+                    prev_action = obs_dict.get(key)
+                    if prev_action is None:
+                        continue
+                    prev_action = prev_action.to(device=device, dtype=dtype)
+                    if prev_action.ndim == 2:
+                        if prev_action.shape != (batch_size, self.action_dim):
+                            raise ValueError(
+                                f"{key} must be shaped [B, action_dim], got {tuple(prev_action.shape)}."
+                            )
+                        source = prev_action.unsqueeze(1).expand(batch_size, self.horizon, self.action_dim).clone()
+                    elif prev_action.ndim == 3:
+                        if prev_action.shape[0] != batch_size or prev_action.shape[-1] != self.action_dim:
+                            raise ValueError(
+                                f"{key} must be shaped [B, H, action_dim], got {tuple(prev_action.shape)}."
+                            )
+                        if prev_action.shape[1] == self.horizon:
+                            source = prev_action.clone()
+                        elif prev_action.shape[1] == 1:
+                            source = prev_action.expand(batch_size, self.horizon, self.action_dim).clone()
+                        else:
+                            raise ValueError(
+                                f"{key} horizon must be 1 or {self.horizon}, got {prev_action.shape[1]}."
+                            )
+                    else:
+                        raise ValueError(f"{key} must be rank 2 or 3, got {tuple(prev_action.shape)}.")
+                    break
+            if source is None:
+                if obs_dict is None or "agent_pos" not in obs_dict:
+                    raise KeyError(
+                        "flow_matching.source_mode='previous_action' needs previous_action/prev_action/last_action "
+                        "or agent_pos for hold fallback."
+                    )
+                source = self._agent_pos_action_source(obs_dict["agent_pos"], batch_size, device, dtype)
+        elif mode == "hold":
+            if obs_dict is None or "agent_pos" not in obs_dict:
+                raise KeyError("flow_matching.source_mode='hold' requires obs['agent_pos'].")
+            source = self._agent_pos_action_source(obs_dict["agent_pos"], batch_size, device, dtype)
+        else:
+            raise ValueError(f"Unsupported flow source mode {mode!r}.")
+
+        if self.flow_action_source_noise_std > 0.0 and mode != "noise":
+            source = source + self.flow_action_source_noise_std * torch.randn(
+                source.shape,
+                device=device,
+                dtype=dtype,
+                generator=generator,
+            )
+        return source
 
     def _sigma_from_progress(self, progress: torch.Tensor, start: float, end: float) -> torch.Tensor:
         return end + (1.0 - progress) * (start - end)
@@ -1599,6 +1759,15 @@ class GAPPolicy(BasePolicy):
         Returns:
             actions: [B, horizon, action_dim] denoised actions
         """
+        if self.generative_mode == "flow_matching":
+            return self.conditional_flow_sample(
+                memory=memory,
+                memory_pos=memory_pos,
+                context=context,
+                generator=generator,
+                **kwargs,
+            )
+
         if context is not None:
             memory = context["memory"]
             memory_pos = context["memory_pos"]
@@ -1652,6 +1821,71 @@ class GAPPolicy(BasePolicy):
         else:
             return actions
 
+    def conditional_flow_sample(
+        self,
+        memory: Optional[torch.Tensor] = None,
+        memory_pos: Optional[torch.Tensor] = None,
+        context: Optional[Dict[str, Any]] = None,
+        generator=None,
+        **kwargs,
+    ):
+        """
+        Sample actions with deterministic Euler integration of a velocity field.
+
+        The same transformer decoder is reused, but its output is interpreted as
+        d(action) / d(lambda) instead of a DDIM sample/noise prediction.
+        """
+        if context is not None:
+            memory = context["memory"]
+            memory_pos = context["memory_pos"]
+        if memory is None or memory_pos is None:
+            raise ValueError("conditional_flow_sample requires memory/memory_pos or context.")
+
+        B = memory.shape[0]
+        device = memory.device
+        dtype = memory.dtype
+        source_obs = context["obs_dict"] if context is not None else None
+        actions = self._flow_source_actions(
+            source_obs,
+            batch_size=B,
+            device=device,
+            dtype=dtype,
+            generator=generator,
+        )
+
+        lambda_grid = torch.linspace(
+            self.flow_lambda_min,
+            self.flow_lambda_max,
+            self.flow_num_inference_steps + 1,
+            device=device,
+            dtype=dtype,
+        )
+        pi3_features_pred = None
+        for step_idx in range(self.flow_num_inference_steps):
+            lambda_start = lambda_grid[step_idx]
+            lambda_end = lambda_grid[step_idx + 1]
+            lambda_mid = 0.5 * (lambda_start + lambda_end)
+            dt = lambda_end - lambda_start
+            flow_lambda = torch.full((B,), lambda_mid, device=device, dtype=dtype)
+            timestep = self._flow_lambda_to_timestep(flow_lambda, B, device, dtype)
+
+            forward_output = self.forward_diffusion(
+                noised_actions=actions,
+                timestep=timestep,
+                memory=memory,
+                memory_pos=memory_pos,
+                context=context,
+            )
+            if self.predict_future_pi3:
+                velocity, pi3_features_pred = forward_output
+            else:
+                velocity = forward_output
+            actions = actions + dt * velocity
+
+        if self.predict_future_pi3:
+            return actions, pi3_features_pred
+        return actions
+
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
         Predict actions from observations (single frame)
@@ -1669,7 +1903,7 @@ class GAPPolicy(BasePolicy):
         nobs = self.normalizer.normalize(obs_dict)
 
         # Encode observations to memory context (single frame)
-        if self.use_interaction_field:
+        if self.use_interaction_field or self.generative_mode == "flow_matching":
             context = self.encode_observations(nobs, return_context=True)
             memory = None
             memory_pos = None
@@ -1875,6 +2109,104 @@ class GAPPolicy(BasePolicy):
             metrics["left_right_uv_distance_mean"] = float(distance.mean().item())
         return metrics
 
+    def _compute_flow_matching_loss(self, batch):
+        """Compute optional flow-matching loss in normalized action space."""
+        nobs = self.normalizer.normalize(batch["obs"])
+        nactions = self.normalizer["action"].normalize(batch["action"])
+
+        B = nactions.shape[0]
+
+        if self.use_interaction_field:
+            context = self.encode_observations(nobs, return_context=True)
+            memory = None
+            memory_pos = None
+        else:
+            context = None
+            memory, memory_pos = self.encode_observations(nobs)
+
+        flow_lambda = self._sample_flow_lambdas(B, nactions.device, nactions.dtype)
+        source_actions = self._flow_source_actions(
+            nobs,
+            batch_size=B,
+            device=nactions.device,
+            dtype=nactions.dtype,
+        )
+        lambda_view = flow_lambda.view(B, 1, 1)
+        mid_actions = source_actions + lambda_view * (nactions - source_actions)
+        target_velocity = nactions - source_actions
+        timesteps = self._flow_lambda_to_timestep(flow_lambda, B, nactions.device, nactions.dtype)
+
+        forward_output = self.forward_diffusion(
+            noised_actions=mid_actions,
+            timestep=timesteps,
+            memory=memory,
+            memory_pos=memory_pos,
+            context=context,
+        )
+
+        if self.predict_future_pi3:
+            pred_velocity, pi3_pred = forward_output
+        else:
+            pred_velocity = forward_output
+
+        flow_loss = F.mse_loss(pred_velocity, target_velocity, reduction="none")
+        flow_loss = reduce(flow_loss, "b ... -> b (...)", "mean")
+        flow_loss = flow_loss.mean()
+
+        loss = flow_loss
+        loss_dict = {
+            "action_loss": flow_loss.item(),
+            "flow_loss": flow_loss.item(),
+            "flow_prediction_type": self.flow_prediction_type,
+            "flow_source_mode": self.flow_source_mode,
+            "flow_lambda_mean": float(flow_lambda.detach().mean().item()),
+            "flow_lambda_min": float(flow_lambda.detach().min().item()),
+            "flow_lambda_max": float(flow_lambda.detach().max().item()),
+            "flow_source_std": float(source_actions.detach().std().item()),
+        }
+
+        if self.predict_future_pi3:
+            if "future_pi3_features" not in batch:
+                raise KeyError(
+                    "future Pi3 loss is enabled, but batch does not contain "
+                    "'future_pi3_features'. Set use_future_loss=false or provide Pi3 features."
+                )
+            future_pi3 = batch["future_pi3_features"]
+            future_target, future_mask = self._prepare_future_pi3_target(future_pi3, batch)
+            future_loss = self._future_loss(pi3_pred, future_target, future_mask)
+            loss = loss + self.future_loss_weight * future_loss
+            loss_dict["future_loss"] = future_loss.item()
+            loss_dict["pi3_loss"] = future_loss.item()
+            loss_dict["future_loss_mode"] = self.future_target_mode
+            loss_dict["total_loss"] = loss.item()
+        elif self.predict_interaction_state:
+            raise NotImplementedError(
+                "future_target_mode='interaction_state' requires dataset-provided "
+                "future_interaction_state and a prediction head; current public data "
+                "does not expose object pose/keypoints needed for this mode."
+            )
+        else:
+            loss_dict["future_loss"] = 0.0
+            loss_dict["future_loss_mode"] = "none"
+            loss_dict["total_loss"] = loss.item()
+
+        if self.interaction_mode == "action_uv":
+            aux = context.get("interaction_aux", {}) if context is not None else {}
+            uv_loss, uv_metrics = self._action_uv_supervision_loss(batch, aux)
+            if uv_loss is not None:
+                loss = loss + self.interaction_uv_loss_weight * uv_loss
+                loss_dict.update(uv_metrics)
+                loss_dict["total_loss"] = loss.item()
+            clean_uv_loss, clean_uv_metrics = self._clean_action_uv_supervision_loss(batch, nobs, nactions)
+            if clean_uv_loss is not None:
+                loss = loss + self.interaction_clean_uv_loss_weight * clean_uv_loss
+                loss_dict.update(clean_uv_metrics)
+                loss_dict["total_loss"] = loss.item()
+            if self.interaction_log_stats:
+                loss_dict.update(self._mask_debug_metrics(aux))
+
+        return loss, loss_dict
+
     def compute_loss(self, batch):
         """
         Compute diffusion loss (single frame per batch)
@@ -1891,6 +2223,9 @@ class GAPPolicy(BasePolicy):
             loss: scalar tensor
             loss_dict: dict with loss components
         """
+        if self.generative_mode == "flow_matching":
+            return self._compute_flow_matching_loss(batch)
+
         # Normalize
         nobs = self.normalizer.normalize(batch["obs"])
         nactions = self.normalizer["action"].normalize(batch["action"])

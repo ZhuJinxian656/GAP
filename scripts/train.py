@@ -150,7 +150,7 @@ def main(cfg: OmegaConf):
         cfg.training.num_epochs = 100
         cfg.training.max_train_steps = 10
         cfg.training.max_val_steps = 3
-        cfg.training.checkpoint_every = 1
+        cfg.training.checkpoint_every = cfg.training.num_epochs
         cfg.training.val_every = 1
 
     # Training loop
@@ -222,6 +222,7 @@ def main(cfg: OmegaConf):
             }, step=global_step)
 
         # Save checkpoint
+        save_ckpt = bool(cfg.get("checkpoint", {}).get("save_ckpt", True))
         checkpoint_tag = cfg.get("checkpoint_tag", None)
         checkpoint_dir_name = (
             f"{task_name}_{checkpoint_tag}_{expert_data_num}"
@@ -229,7 +230,7 @@ def main(cfg: OmegaConf):
             else f"{task_name}_{setting}_{expert_data_num}"
         )
         checkpoint_dir = os.path.join(os.getcwd(), "checkpoints", checkpoint_dir_name)
-        if (epoch + 1) % cfg.training.checkpoint_every == 0:
+        if save_ckpt and (epoch + 1) % cfg.training.checkpoint_every == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f"{epoch+1}.ckpt")
             os.makedirs(checkpoint_dir, exist_ok=True)
 
