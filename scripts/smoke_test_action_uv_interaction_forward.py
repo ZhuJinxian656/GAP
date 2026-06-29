@@ -78,6 +78,12 @@ def main() -> int:
             "uv_loss_weight": 0.05,
             "use_current_eef_fallback": True,
             "current_eef_fallback_weight": 0.25,
+            "uv_loss_progress_gamma": 2.0,
+            "uv_loss_min_progress": 0.05,
+            "uv_loss_clamp_target": True,
+            "clean_uv_loss_weight": 0.05,
+            "clean_uv_progress": 1.0,
+            "log_interaction_stats": True,
         },
     ).to(device)
 
@@ -106,6 +112,8 @@ def main() -> int:
     }
     batch["target_dino_eef_uv_seq"][..., 0] *= 19.0
     batch["target_dino_eef_uv_seq"][..., 1] *= 14.0
+    batch["target_dino_eef_uv_seq"][0, 0, 0, 0, 0] = -3.0
+    batch["target_dino_eef_uv_seq"][0, 0, 0, 1, 1] = 25.0
 
     normalizer = LinearNormalizer()
     normalizer.fit(
@@ -127,7 +135,15 @@ def main() -> int:
 
     loss, loss_dict = policy.compute_loss(batch)
     assert torch.isfinite(loss), loss_dict
-    assert "uv_loss" in loss_dict, loss_dict
+    for key in (
+        "uv_loss",
+        "clean_uv_loss",
+        "uv_progress_weight_mean",
+        "target_uv_valid_fraction",
+        "left_mask_mass",
+        "right_mask_mass",
+    ):
+        assert key in loss_dict, loss_dict
     loss.backward()
 
     grad_norm = 0.0

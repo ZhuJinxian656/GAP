@@ -597,6 +597,12 @@ class GAPPolicy(BasePolicy):
         self.interaction_current_eef_fallback_weight = float(
             self.interaction_cfg.get("current_eef_fallback_weight", 0.25)
         )
+        self.interaction_uv_loss_progress_gamma = float(self.interaction_cfg.get("uv_loss_progress_gamma", 2.0))
+        self.interaction_uv_loss_min_progress = float(self.interaction_cfg.get("uv_loss_min_progress", 0.05))
+        self.interaction_uv_loss_clamp_target = bool(self.interaction_cfg.get("uv_loss_clamp_target", True))
+        self.interaction_clean_uv_loss_weight = float(self.interaction_cfg.get("clean_uv_loss_weight", 0.05))
+        self.interaction_clean_uv_progress = float(self.interaction_cfg.get("clean_uv_progress", 1.0))
+        self.interaction_log_stats = bool(self.interaction_cfg.get("log_interaction_stats", True))
         self.action_to_uv_head = None
         if self.use_interaction_field:
             if self.interaction_mode == "disabled":
@@ -1704,17 +1710,14 @@ class GAPPolicy(BasePolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
-    def _action_uv_supervision_loss(
+    def _target_uv_tensors(
         self,
         batch: Dict[str, Any],
-        aux: Dict[str, torch.Tensor],
-    ) -> tuple[Optional[torch.Tensor], Dict[str, float]]:
-        if self.interaction_mode != "action_uv" or "pred_uv" not in aux:
-            return None, {}
+        pred_uv: torch.Tensor,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Dict[str, float]]:
         if "target_dino_eef_uv_seq" not in batch or "target_dino_eef_valid_seq" not in batch:
-            return None, {}
+            return None, None, {}
 
-        pred_uv = aux["pred_uv"]
         target_uv = batch["target_dino_eef_uv_seq"].to(device=pred_uv.device, dtype=pred_uv.dtype)
         valid = batch["target_dino_eef_valid_seq"].to(device=pred_uv.device, dtype=pred_uv.dtype)
         if target_uv.ndim != 5 or target_uv.shape[-2:] != (2, 2):
@@ -1734,18 +1737,143 @@ class GAPPolicy(BasePolicy):
             )
 
         valid = valid.clamp(0.0, 1.0)
-        per_point_loss = (pred_uv - target_uv).pow(2).mean(dim=-1)
-        denom = valid.sum().clamp_min(1.0)
-        uv_loss = (per_point_loss * valid).sum() / denom
+        valid_count = valid.sum().clamp_min(1.0)
+        target_x = target_uv[..., 0]
+        target_y = target_uv[..., 1]
+        oob = (
+            (target_x < 0.0)
+            | (target_x > float(self.interaction_grid_width - 1))
+            | (target_y < 0.0)
+            | (target_y > float(self.interaction_grid_height - 1))
+        ).to(dtype=target_uv.dtype)
         metrics = {
-            "uv_loss": float(uv_loss.detach().item()),
-            "uv_loss_weight": self.interaction_uv_loss_weight,
+            "target_uv_oob_fraction": float(((oob * valid).sum() / valid_count).detach().item()),
+            "target_uv_valid_fraction": float(valid.detach().mean().item()),
+        }
+        if self.interaction_uv_loss_clamp_target:
+            target_uv = target_uv.clone()
+            target_uv[..., 0] = target_uv[..., 0].clamp(0.0, float(self.interaction_grid_width - 1))
+            target_uv[..., 1] = target_uv[..., 1].clamp(0.0, float(self.interaction_grid_height - 1))
+        return target_uv, valid, metrics
+
+    def _progress_uv_weights(
+        self,
+        progress: Optional[torch.Tensor],
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if progress is None:
+            return torch.ones(batch_size, device=device, dtype=dtype)
+        progress = progress.to(device=device, dtype=dtype).reshape(batch_size)
+        denom = max(1.0e-6, 1.0 - self.interaction_uv_loss_min_progress)
+        raw = ((progress - self.interaction_uv_loss_min_progress) / denom).clamp(0.0, 1.0)
+        return raw.pow(self.interaction_uv_loss_progress_gamma)
+
+    def _action_uv_loss_from_prediction(
+        self,
+        pred_uv: torch.Tensor,
+        target_uv: torch.Tensor,
+        valid: torch.Tensor,
+        progress: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, Dict[str, float]]:
+        progress_weight = self._progress_uv_weights(
+            progress,
+            pred_uv.shape[0],
+            pred_uv.device,
+            pred_uv.dtype,
+        )
+        per_point_loss = (pred_uv - target_uv).pow(2).mean(dim=-1)
+        weighted_valid = valid * progress_weight.view(-1, 1, 1, 1)
+        denom = weighted_valid.sum()
+        numerator = (per_point_loss * weighted_valid).sum()
+        if float(denom.detach().item()) <= 0.0:
+            uv_loss = numerator * 0.0
+        else:
+            uv_loss = numerator / denom
+        metrics = {
+            "uv_progress_weight_mean": float(progress_weight.detach().mean().item()),
+            "uv_progress_weight_min": float(progress_weight.detach().min().item()),
+            "uv_progress_weight_max": float(progress_weight.detach().max().item()),
             "pred_uv_mean": float(pred_uv.detach().mean().item()),
             "pred_uv_std": float(pred_uv.detach().std().item()),
         }
-        if "progress" in aux:
-            metrics["interaction_progress_mean"] = float(aux["progress"].detach().mean().item())
         return uv_loss, metrics
+
+    def _action_uv_supervision_loss(
+        self,
+        batch: Dict[str, Any],
+        aux: Dict[str, torch.Tensor],
+    ) -> tuple[Optional[torch.Tensor], Dict[str, float]]:
+        if self.interaction_mode != "action_uv" or "pred_uv" not in aux:
+            return None, {}
+
+        pred_uv = aux["pred_uv"]
+        target_uv, valid, target_metrics = self._target_uv_tensors(batch, pred_uv)
+        if target_uv is None or valid is None:
+            return None, {}
+
+        progress = aux.get("progress")
+        uv_loss, metrics = self._action_uv_loss_from_prediction(pred_uv, target_uv, valid, progress)
+        metrics.update(target_metrics)
+        metrics["uv_loss"] = float(uv_loss.detach().item())
+        metrics["uv_loss_weight"] = self.interaction_uv_loss_weight
+        if progress is not None:
+            metrics["interaction_progress_mean"] = float(progress.detach().mean().item())
+        return uv_loss, metrics
+
+    def _clean_action_uv_supervision_loss(
+        self,
+        batch: Dict[str, Any],
+        nobs: Dict[str, torch.Tensor],
+        nactions: torch.Tensor,
+    ) -> tuple[Optional[torch.Tensor], Dict[str, float]]:
+        if (
+            self.interaction_mode != "action_uv"
+            or self.action_to_uv_head is None
+            or self.interaction_clean_uv_loss_weight <= 0.0
+        ):
+            return None, {}
+        clean_progress = torch.full(
+            (nactions.shape[0],),
+            self.interaction_clean_uv_progress,
+            device=nactions.device,
+            dtype=nactions.dtype,
+        )
+        clean_pred_uv = self.action_to_uv_head(nactions, nobs["agent_pos"], clean_progress)
+        target_uv, valid, _ = self._target_uv_tensors(batch, clean_pred_uv)
+        if target_uv is None or valid is None:
+            return None, {}
+        clean_uv_loss, _ = self._action_uv_loss_from_prediction(clean_pred_uv, target_uv, valid, clean_progress)
+        metrics = {
+            "clean_uv_loss": float(clean_uv_loss.detach().item()),
+            "clean_uv_loss_weight": self.interaction_clean_uv_loss_weight,
+            "clean_pred_uv_mean": float(clean_pred_uv.detach().mean().item()),
+            "clean_pred_uv_std": float(clean_pred_uv.detach().std().item()),
+        }
+        return clean_uv_loss, metrics
+
+    def _mask_debug_metrics(self, aux: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        metrics = {}
+        for name, metric_prefix in (
+            ("left_mask", "left_mask"),
+            ("right_mask", "right_mask"),
+            ("pair_mask", "pair_mask"),
+        ):
+            mask = aux.get(name)
+            if mask is None:
+                continue
+            mask_detached = mask.detach()
+            metrics[f"{metric_prefix}_mass"] = float(mask_detached.sum(dim=-1).mean().item())
+            metrics[f"{metric_prefix}_max"] = float(mask_detached.amax(dim=-1).mean().item())
+        pred_uv = aux.get("pred_uv")
+        if pred_uv is not None:
+            distance = torch.linalg.vector_norm(
+                pred_uv.detach()[:, :, :, 0, :] - pred_uv.detach()[:, :, :, 1, :],
+                dim=-1,
+            )
+            metrics["left_right_uv_distance_mean"] = float(distance.mean().item())
+        return metrics
 
     def compute_loss(self, batch):
         """
@@ -1874,6 +2002,13 @@ class GAPPolicy(BasePolicy):
                 loss = loss + self.interaction_uv_loss_weight * uv_loss
                 loss_dict.update(uv_metrics)
                 loss_dict["total_loss"] = loss.item()
+            clean_uv_loss, clean_uv_metrics = self._clean_action_uv_supervision_loss(batch, nobs, nactions)
+            if clean_uv_loss is not None:
+                loss = loss + self.interaction_clean_uv_loss_weight * clean_uv_loss
+                loss_dict.update(clean_uv_metrics)
+                loss_dict["total_loss"] = loss.item()
+            if self.interaction_log_stats:
+                loss_dict.update(self._mask_debug_metrics(aux))
 
         return loss, loss_dict
 

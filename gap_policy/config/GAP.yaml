@@ -81,6 +81,12 @@ policy:
     uv_loss_weight: 0.05
     use_current_eef_fallback: true
     current_eef_fallback_weight: 0.25
+    uv_loss_progress_gamma: 2.0
+    uv_loss_min_progress: 0.05
+    uv_loss_clamp_target: true
+    clean_uv_loss_weight: 0.05
+    clean_uv_progress: 1.0
+    log_interaction_stats: true
 
   # State encoder config
   state_dim: 14
