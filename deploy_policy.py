@@ -183,6 +183,11 @@ class GAPPolicyWrapper:
         self.latent_mode = getattr(self.policy_model, "latent_mode", policy_cfg.get("latent_mode", "pi3_full"))
         self.latent_mask_key = mask_key_for_mode(self.latent_mode)
         self.eef_mask_radius_tokens = float(os.environ.get("GAP_EEF_MASK_RADIUS_TOKENS", "2.5"))
+        self.use_interaction_field = bool(policy_cfg.get("use_interaction_field", False))
+        interaction_cfg = policy_cfg.get("interaction_field", {})
+        self.interaction_field_mode = interaction_cfg.get("mode", "disabled")
+        self.dino_eef_mask_radius_tokens = float(os.environ.get("GAP_DINO_EEF_MASK_RADIUS_TOKENS", "2.5"))
+        self.dino_pair_mask_radius_tokens = float(os.environ.get("GAP_DINO_PAIR_MASK_RADIUS_TOKENS", "2.5"))
 
     def reset(self):
         """Reset policy state between episodes (GAP is stateless)"""
@@ -316,6 +321,113 @@ class GAPPolicyWrapper:
         mask = mask.astype(np.float32).reshape(1, 1, grid_h * grid_w)
         return torch.from_numpy(mask).to(device=self.device)
 
+    def _disk_token_mask(
+        self,
+        token_uv: np.ndarray,
+        valid: bool,
+        grid_h: int,
+        grid_w: int,
+        radius_tokens: float,
+    ) -> np.ndarray:
+        mask = np.zeros((grid_h, grid_w), dtype=bool)
+        if not valid:
+            return mask
+        yy, xx = np.meshgrid(
+            np.arange(grid_h, dtype=np.float32),
+            np.arange(grid_w, dtype=np.float32),
+            indexing="ij",
+        )
+        dist2 = (xx - token_uv[0]) ** 2 + (yy - token_uv[1]) ** 2
+        mask = dist2 <= radius_tokens ** 2
+        return mask
+
+    def _segment_token_mask(
+        self,
+        left_token_uv: np.ndarray,
+        right_token_uv: np.ndarray,
+        valid: bool,
+        grid_h: int,
+        grid_w: int,
+        radius_tokens: float,
+    ) -> np.ndarray:
+        mask = np.zeros((grid_h, grid_w), dtype=bool)
+        if not valid:
+            return mask
+        yy, xx = np.meshgrid(
+            np.arange(grid_h, dtype=np.float32),
+            np.arange(grid_w, dtype=np.float32),
+            indexing="ij",
+        )
+        points = np.stack([xx, yy], axis=-1)
+        segment = right_token_uv - left_token_uv
+        length2 = float(np.dot(segment, segment))
+        if length2 <= 1e-12:
+            closest = left_token_uv
+        else:
+            t = np.clip(np.sum((points - left_token_uv) * segment, axis=-1) / length2, 0.0, 1.0)
+            closest = left_token_uv + t[..., None] * segment
+        dist2 = np.sum((points - closest) ** 2, axis=-1)
+        mask = dist2 <= radius_tokens ** 2
+        return mask
+
+    def _dino_eef_interaction_fields(self, rgb_image: np.ndarray, raw_observation: dict) -> dict:
+        if raw_observation is None:
+            raise KeyError(
+                "current_eef interaction field requires raw RoboTwin observation with "
+                "head-camera calibration and left/right endpose fields."
+            )
+        try:
+            left = np.asarray(raw_observation["endpose"]["left_endpose"], dtype=np.float32)[:3]
+            right = np.asarray(raw_observation["endpose"]["right_endpose"], dtype=np.float32)[:3]
+        except KeyError as exc:
+            raise KeyError(
+                "current_eef interaction field requires raw_observation['endpose'] with "
+                "'left_endpose' and 'right_endpose'."
+            ) from exc
+
+        image_h, image_w = rgb_image.shape[:2]
+        grid_h = int(self.policy_model.dinov3_grid_height)
+        grid_w = int(self.policy_model.dinov3_grid_width)
+        num_tokens = grid_h * grid_w
+
+        token_uv = np.zeros((2, 2), dtype=np.float32)
+        valid = np.zeros((2,), dtype=np.float32)
+        region_mask = np.zeros((2, num_tokens), dtype=np.float32)
+        for arm_idx, point in enumerate((left, right)):
+            uv, is_valid = self._project_point_to_head_camera(point, raw_observation)
+            in_image = (
+                is_valid
+                and 0 <= uv[0] < image_w
+                and 0 <= uv[1] < image_h
+            )
+            if in_image:
+                token_uv[arm_idx, 0] = (uv[0] / image_w) * grid_w - 0.5
+                token_uv[arm_idx, 1] = (uv[1] / image_h) * grid_h - 0.5
+                valid[arm_idx] = 1.0
+                region_mask[arm_idx] = self._disk_token_mask(
+                    token_uv[arm_idx],
+                    True,
+                    grid_h,
+                    grid_w,
+                    self.dino_eef_mask_radius_tokens,
+                ).reshape(num_tokens).astype(np.float32)
+
+        pair_mask = self._segment_token_mask(
+            token_uv[0],
+            token_uv[1],
+            bool(valid[0] and valid[1]),
+            grid_h,
+            grid_w,
+            self.dino_pair_mask_radius_tokens,
+        ).reshape(num_tokens).astype(np.float32)
+
+        return {
+            "dino_eef_uv": torch.from_numpy(token_uv.reshape(1, 1, 2, 2)).to(device=self.device),
+            "dino_eef_valid": torch.from_numpy(valid.reshape(1, 1, 2)).to(device=self.device),
+            "dino_eef_region_mask": torch.from_numpy(region_mask.reshape(1, 1, 2, num_tokens)).to(device=self.device),
+            "dino_pair_region_mask": torch.from_numpy(pair_mask.reshape(1, 1, num_tokens)).to(device=self.device),
+        }
+
     def add_online_latent_masks(self, obs_dict: dict, rgb_image: np.ndarray, raw_observation=None) -> None:
         if self.latent_mask_key is None:
             return
@@ -331,6 +443,19 @@ class GAPPolicyWrapper:
                 raw_observation,
                 complement=True,
             )
+
+    def add_online_interaction_fields(self, obs_dict: dict, rgb_image: np.ndarray, raw_observation=None) -> None:
+        if not self.use_interaction_field:
+            return
+        if self.interaction_field_mode == "current_eef":
+            obs_dict.update(self._dino_eef_interaction_fields(rgb_image, raw_observation))
+        elif self.interaction_field_mode == "action_uv":
+            raise NotImplementedError(
+                "interaction_field.mode='action_uv' is reserved for action-conditioned "
+                "A_lambda queries and is not implemented in this milestone. Use mode='current_eef'."
+            )
+        elif self.interaction_field_mode != "disabled":
+            raise ValueError(f"Unsupported interaction_field.mode={self.interaction_field_mode!r}.")
 
     def get_action(self, rgb_image: np.ndarray, state: np.ndarray, raw_observation=None) -> np.ndarray:
         """
@@ -368,6 +493,7 @@ class GAPPolicyWrapper:
             obs_dict["pi3_features"] = pi3_features
 
         self.add_online_latent_masks(obs_dict, rgb_image, raw_observation=raw_observation)
+        self.add_online_interaction_fields(obs_dict, rgb_image, raw_observation=raw_observation)
 
         if self.use_triadic_token:
             triadic_source = {"agent_pos": state}

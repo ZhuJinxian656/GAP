@@ -53,6 +53,8 @@ class GAPDataset(BaseDataset):
         latent_mode="pi3_full",
         use_future_loss=True,
         future_target_mode="pi3_full",
+        use_interaction_field=False,
+        interaction_field_mode="disabled",
     ):
         super().__init__()
         self.task_name = task_name
@@ -61,6 +63,14 @@ class GAPDataset(BaseDataset):
         self.latent_mode = latent_mode
         self.use_future_loss = bool(use_future_loss)
         self.future_target_mode = future_target_mode
+        self.use_interaction_field = bool(use_interaction_field)
+        self.interaction_field_mode = interaction_field_mode or "disabled"
+        self.interaction_field_keys = [
+            "dino_eef_uv",
+            "dino_eef_valid",
+            "dino_eef_region_mask",
+            "dino_pair_region_mask",
+        ]
 
         # Make path relative to this file
         current_file_path = os.path.abspath(__file__)
@@ -85,6 +95,14 @@ class GAPDataset(BaseDataset):
         self.use_interaction_state = future_target_mode == "interaction_state"
         if self.use_interaction_state:
             keys.append("future_interaction_state")
+        if self.use_interaction_field:
+            if self.interaction_field_mode in ("current_eef", "action_uv"):
+                keys.extend(self.interaction_field_keys)
+            elif self.interaction_field_mode != "disabled":
+                raise ValueError(
+                    "Unsupported interaction_field_mode="
+                    f"{self.interaction_field_mode!r}. Expected disabled, current_eef, or action_uv."
+                )
 
         zarr_group = zarr.open(zarr_path, mode="r")
         available_keys = set(zarr_group["data"].array_keys())
@@ -101,6 +119,12 @@ class GAPDataset(BaseDataset):
                     reasons.append(
                         "'future_interaction_state' is required by "
                         "future_target_mode='interaction_state'."
+                    )
+                elif key in self.interaction_field_keys:
+                    reasons.append(
+                        f"{key!r} is required by use_interaction_field=True "
+                        f"with interaction_field_mode={self.interaction_field_mode!r}. "
+                        "Run scripts/generate_dino_eef_region_masks.py for this zarr first."
                     )
                 else:
                     reasons.append(f"{key!r} is required by the GAP dataset configuration.")
@@ -162,6 +186,9 @@ class GAPDataset(BaseDataset):
             print(f"  Mask {key} shape: {self.replay_buffer[key].shape}")
         if self.use_interaction_state:
             print(f"  Future interaction state shape: {self.replay_buffer['future_interaction_state'].shape}")
+        if self.use_interaction_field and self.interaction_field_mode in ("current_eef", "action_uv"):
+            for key in self.interaction_field_keys:
+                print(f"  Interaction field {key} shape: {self.replay_buffer[key].shape}")
 
     def get_validation_dataset(self):
         """Create validation dataset with same parameters"""
@@ -197,6 +224,9 @@ class GAPDataset(BaseDataset):
             normalizer["pi3_features"] = self._get_identity_normalizer()
         for key in self.mask_keys:
             normalizer[key] = self._get_identity_normalizer()
+        if self.use_interaction_field and self.interaction_field_mode in ("current_eef", "action_uv"):
+            for key in self.interaction_field_keys:
+                normalizer[key] = self._get_identity_normalizer()
 
         return normalizer
 
@@ -257,6 +287,16 @@ class GAPDataset(BaseDataset):
             triadic_state = sample["triadic_state"].astype(np.float32)
             obs_dict["triadic_state"] = triadic_state[0]
 
+        use_dino_interaction = (
+            self.use_interaction_field
+            and self.interaction_field_mode in ("current_eef", "action_uv")
+        )
+        if use_dino_interaction:
+            obs_dict["dino_eef_uv"] = sample["dino_eef_uv"].astype(np.float32)[0]
+            obs_dict["dino_eef_valid"] = sample["dino_eef_valid"].astype(np.float32)[0]
+            obs_dict["dino_eef_region_mask"] = sample["dino_eef_region_mask"].astype(np.float32)[0]
+            obs_dict["dino_pair_region_mask"] = sample["dino_pair_region_mask"].astype(np.float32)[0]
+
         for key in self.mask_keys:
             mask = sample[key].astype(np.float32)
             obs_dict[key] = mask[0]
@@ -278,6 +318,10 @@ class GAPDataset(BaseDataset):
             "obs": obs_dict,
             "action": action,  # [T, 14] - full action sequence
         }
+
+        if use_dino_interaction:
+            data["future_dino_eef_uv_seq"] = sample["dino_eef_uv"].astype(np.float32)
+            data["future_dino_eef_valid_seq"] = sample["dino_eef_valid"].astype(np.float32)
 
         for key in self.mask_keys:
             data[f"future_{key}"] = obs_dict.pop(f"future_{key}")

@@ -91,6 +91,8 @@ def main(cfg: OmegaConf):
         latent_mode=cfg.get("latent_mode", cfg.policy.get("latent_mode", "pi3_full")),
         use_future_loss=cfg.get("use_future_loss", cfg.policy.get("use_future_loss", True)),
         future_target_mode=cfg.get("future_target_mode", cfg.policy.get("future_target_mode", "pi3_full")),
+        use_interaction_field=cfg.policy.get("use_interaction_field", False),
+        interaction_field_mode=cfg.policy.get("interaction_field", {}).get("mode", "disabled"),
     )
 
     # Get normalizer

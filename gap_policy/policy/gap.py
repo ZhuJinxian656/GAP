@@ -381,6 +381,9 @@ class GAPPolicy(BasePolicy):
         triadic_hidden_dim=1024,
         triadic_dropout=0.0,
         triadic_include_grippers=True,
+        # Optional DINO EEF interaction-field tokens
+        use_interaction_field=False,
+        interaction_field=None,
         # Transformer encoder config (for context encoding - ACT-DP-TP style)
         encoder_depth=2,
         encoder_heads=8,
@@ -509,6 +512,44 @@ class GAPPolicy(BasePolicy):
         # Feature dimension for decoder (same as vision/state dim)
         self.feature_dim = vision_feat_dim  # 1024
 
+        self.use_interaction_field = bool(use_interaction_field)
+        self.interaction_cfg = self._to_plain_dict(interaction_field)
+        self.interaction_mode = self.interaction_cfg.get("mode", "disabled")
+        self.interaction_readout = self.interaction_cfg.get("readout", "masked_pool")
+        self.interaction_use_pair_token = bool(self.interaction_cfg.get("use_pair_token", True))
+        self.interaction_append_tokens = bool(self.interaction_cfg.get("append_tokens", True))
+        self.interaction_eps = float(self.interaction_cfg.get("eps", 1.0e-6))
+        self.interaction_grid_height = int(self.interaction_cfg.get("grid_height", self.dinov3_grid_height))
+        self.interaction_grid_width = int(self.interaction_cfg.get("grid_width", self.dinov3_grid_width))
+        if self.use_interaction_field:
+            if self.interaction_mode == "disabled":
+                raise ValueError("use_interaction_field=True requires interaction_field.mode to be current_eef.")
+            if self.interaction_mode == "action_uv":
+                raise NotImplementedError(
+                    "interaction_field.mode='action_uv' is reserved for action-conditioned "
+                    "A_lambda queries and is not implemented in this milestone. Use mode='current_eef'."
+                )
+            if self.interaction_mode != "current_eef":
+                raise ValueError(
+                    f"Unsupported interaction_field.mode={self.interaction_mode!r}. "
+                    "Expected disabled, current_eef, or action_uv."
+                )
+            if self.interaction_readout != "masked_pool":
+                raise ValueError(
+                    f"Unsupported interaction_field.readout={self.interaction_readout!r}. "
+                    "Only 'masked_pool' is implemented."
+                )
+            expected_tokens = self.dinov3_grid_height * self.dinov3_grid_width
+            configured_tokens = self.interaction_grid_height * self.interaction_grid_width
+            if configured_tokens != expected_tokens:
+                raise ValueError(
+                    "interaction_field grid size must match the DINO grid used by the policy, "
+                    f"got {self.interaction_grid_height}x{self.interaction_grid_width} "
+                    f"vs {self.dinov3_grid_height}x{self.dinov3_grid_width}."
+                )
+            self.interaction_type_embed = nn.Embedding(3, self.feature_dim)
+            self.interaction_pos_embed = nn.Embedding(3, self.feature_dim)
+
         # CLS token (learnable global context token)
         self.cls_token = nn.Parameter(torch.randn(1, 1, self.feature_dim))
 
@@ -615,6 +656,7 @@ class GAPPolicy(BasePolicy):
         cprint(f"  Vision feature dim: {vision_feat_dim}", "cyan")
         cprint(f"  State embed dim: {state_embed_dim}", "cyan")
         cprint(f"  Triadic token: {self.use_triadic_token} ({triadic_mode}, dim={self.triadic_dim})", "cyan")
+        cprint(f"  Interaction field: {self.use_interaction_field} ({self.interaction_mode})", "cyan")
         cprint(f"  Encoder depth: {encoder_depth} (Feature encoding)", "cyan")
         cprint(f"  Decoder depth: {decoder_depth} (Action denoising)", "cyan")
         cprint(f"  Action dim: {action_dim}", "cyan")
@@ -690,6 +732,112 @@ class GAPPolicy(BasePolicy):
                 "Run preprocessing with real object/hand masks or use a non-mask latent mode."
             )
         return obs_dict[lookup_key]
+
+    def _masked_pool_tokens(self, tokens: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if tokens.ndim != 3:
+            raise ValueError(f"DINO tokens must be shaped [B, N, D], got {tuple(tokens.shape)}.")
+        if mask.ndim == 2:
+            mask_flat = mask
+        elif mask.ndim == 3:
+            mask_flat = mask.reshape(mask.shape[0], -1)
+        else:
+            raise ValueError(f"Interaction mask must be shaped [B, N] or [B, V, N], got {tuple(mask.shape)}.")
+
+        if mask_flat.shape[0] != tokens.shape[0]:
+            raise ValueError(
+                f"Interaction mask batch size {mask_flat.shape[0]} does not match token batch size {tokens.shape[0]}."
+            )
+        if mask_flat.shape[1] != tokens.shape[1]:
+            if tokens.shape[1] % mask_flat.shape[1] != 0:
+                raise ValueError(
+                    f"Interaction mask token count {mask_flat.shape[1]} does not match DINO token count "
+                    f"{tokens.shape[1]} and cannot be repeated across views."
+                )
+            repeat = tokens.shape[1] // mask_flat.shape[1]
+            mask_flat = mask_flat.unsqueeze(1).expand(-1, repeat, -1).reshape(mask_flat.shape[0], -1)
+
+        mask_flat = mask_flat.to(device=tokens.device, dtype=tokens.dtype)
+        denom = mask_flat.sum(dim=1, keepdim=True).clamp_min(self.interaction_eps)
+        return (tokens * mask_flat.unsqueeze(-1)).sum(dim=1) / denom
+
+    def _compute_current_eef_interaction_tokens(
+        self,
+        dinov3_tokens: torch.Tensor,
+        obs_dict: Dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.interaction_mode == "action_uv":
+            raise NotImplementedError(
+                "interaction_field.mode='action_uv' is reserved for action-conditioned "
+                "A_lambda queries and is not implemented in this milestone. Use mode='current_eef'."
+            )
+        if self.interaction_mode != "current_eef":
+            raise ValueError(f"Unsupported interaction_field.mode={self.interaction_mode!r}.")
+
+        required = (
+            "dino_eef_uv",
+            "dino_eef_valid",
+            "dino_eef_region_mask",
+            "dino_pair_region_mask",
+        )
+        missing = [key for key in required if key not in obs_dict]
+        if missing:
+            raise KeyError(
+                "current_eef interaction field requires obs keys "
+                f"{', '.join(required)}, missing: {', '.join(missing)}. "
+                "Run scripts/generate_dino_eef_region_masks.py and enable dataset interaction fields."
+            )
+
+        dino_eef_uv = obs_dict["dino_eef_uv"]
+        eef_valid = obs_dict["dino_eef_valid"].to(device=dinov3_tokens.device, dtype=dinov3_tokens.dtype)
+        eef_mask = obs_dict["dino_eef_region_mask"].to(device=dinov3_tokens.device, dtype=dinov3_tokens.dtype)
+        pair_mask = obs_dict["dino_pair_region_mask"].to(device=dinov3_tokens.device, dtype=dinov3_tokens.dtype)
+
+        if dino_eef_uv.ndim != 4 or dino_eef_uv.shape[2:] != (2, 2):
+            raise ValueError(f"dino_eef_uv must be shaped [B, V, 2, 2], got {tuple(dino_eef_uv.shape)}.")
+        if eef_mask.ndim != 4 or eef_mask.shape[2] != 2:
+            raise ValueError(
+                "dino_eef_region_mask must be shaped [B, V, 2, N], "
+                f"got {tuple(eef_mask.shape)}."
+            )
+        if eef_valid.ndim != 3 or eef_valid.shape[2] != 2:
+            raise ValueError(f"dino_eef_valid must be shaped [B, V, 2], got {tuple(eef_valid.shape)}.")
+        if pair_mask.ndim != 3:
+            raise ValueError(f"dino_pair_region_mask must be shaped [B, V, N], got {tuple(pair_mask.shape)}.")
+
+        left_mask = eef_mask[:, :, 0, :] * eef_valid[:, :, 0:1]
+        right_mask = eef_mask[:, :, 1, :] * eef_valid[:, :, 1:2]
+        pooled_tokens = [
+            self._masked_pool_tokens(dinov3_tokens, left_mask),
+            self._masked_pool_tokens(dinov3_tokens, right_mask),
+        ]
+        type_ids = [0, 1]
+
+        if self.interaction_use_pair_token:
+            both_valid = eef_valid[:, :, 0] * eef_valid[:, :, 1]
+            pooled_tokens.append(self._masked_pool_tokens(dinov3_tokens, pair_mask * both_valid.unsqueeze(-1)))
+            type_ids.append(2)
+
+        token_tensor = torch.stack(pooled_tokens, dim=1)
+        type_ids_tensor = torch.tensor(type_ids, device=dinov3_tokens.device, dtype=torch.long)
+        token_tensor = token_tensor + self.interaction_type_embed(type_ids_tensor).unsqueeze(0)
+        pos_tensor = self.interaction_pos_embed(type_ids_tensor).unsqueeze(0).expand(dinov3_tokens.shape[0], -1, -1)
+        return token_tensor, pos_tensor
+
+    def _append_interaction_tokens(
+        self,
+        memory: torch.Tensor,
+        memory_pos: torch.Tensor,
+        context: Dict[str, Any],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.use_interaction_field or not self.interaction_append_tokens:
+            return memory, memory_pos
+        interaction_tokens, interaction_pos = self._compute_current_eef_interaction_tokens(
+            context["dinov3_tokens"],
+            context["obs_dict"],
+        )
+        memory = torch.cat([memory, interaction_tokens], dim=1)
+        memory_pos = torch.cat([memory_pos, interaction_pos], dim=1)
+        return memory, memory_pos
 
     def _apply_pi3_latent_mode(
         self,
@@ -982,7 +1130,7 @@ class GAPPolicy(BasePolicy):
 
         return pos
 
-    def encode_observations(self, obs_dict: Dict[str, torch.Tensor]):
+    def encode_observations(self, obs_dict: Dict[str, torch.Tensor], return_context: bool = False):
         """
         Encode observations to memory context with transformer encoder.
         Uses pre-extracted DinoV3 and Pi3 features.
@@ -1075,14 +1223,25 @@ class GAPPolicy(BasePolicy):
         memory = encoder_output  # [B, N_tokens, D]
         memory_pos = encoder_pos  # [B, N_tokens, D]
 
+        if return_context:
+            return {
+                "memory": memory,
+                "memory_pos": memory_pos,
+                "dinov3_tokens": dinov3_encoded,
+                "dinov3_pos": dinov3_pos,
+                "agent_pos": agent_pos,
+                "obs_dict": obs_dict,
+            }
+
         return memory, memory_pos
 
     def forward_diffusion(
         self,
         noised_actions: torch.Tensor,
         timestep: torch.Tensor,
-        memory: torch.Tensor,
-        memory_pos: torch.Tensor,
+        memory: Optional[torch.Tensor] = None,
+        memory_pos: Optional[torch.Tensor] = None,
+        context: Optional[Dict[str, Any]] = None,
     ):
         """
         Forward pass of denoising model (ACT-DP-TP 'cat' mode)
@@ -1095,11 +1254,19 @@ class GAPPolicy(BasePolicy):
             timestep: [B] diffusion timestep
             memory: [B, N_memory, D] memory features (without position)
             memory_pos: [B, N_memory, D] memory position encodings
+            context: optional dict returned by encode_observations(..., return_context=True)
 
         Returns:
             model_output: [B, horizon, action_dim] predicted output
                 (noise if prediction_type='epsilon', clean sample if 'sample')
         """
+        if context is not None:
+            memory = context["memory"]
+            memory_pos = context["memory_pos"]
+            memory, memory_pos = self._append_interaction_tokens(memory, memory_pos, context)
+        if memory is None or memory_pos is None:
+            raise ValueError("forward_diffusion requires memory/memory_pos or context.")
+
         B = noised_actions.shape[0]
         device = noised_actions.device
 
@@ -1159,8 +1326,9 @@ class GAPPolicy(BasePolicy):
     # ========= inference  ============
     def conditional_sample(
         self,
-        memory: torch.Tensor,
-        memory_pos: torch.Tensor,
+        memory: Optional[torch.Tensor] = None,
+        memory_pos: Optional[torch.Tensor] = None,
+        context: Optional[Dict[str, Any]] = None,
         generator=None,
         **kwargs,
     ):
@@ -1174,6 +1342,12 @@ class GAPPolicy(BasePolicy):
         Returns:
             actions: [B, horizon, action_dim] denoised actions
         """
+        if context is not None:
+            memory = context["memory"]
+            memory_pos = context["memory_pos"]
+        if memory is None or memory_pos is None:
+            raise ValueError("conditional_sample requires memory/memory_pos or context.")
+
         B = memory.shape[0]
         device = memory.device
         dtype = memory.dtype
@@ -1201,6 +1375,7 @@ class GAPPolicy(BasePolicy):
                 timestep=timestep,
                 memory=memory,
                 memory_pos=memory_pos,
+                context=context,
             )
 
             if self.predict_future_pi3:
@@ -1237,12 +1412,19 @@ class GAPPolicy(BasePolicy):
         nobs = self.normalizer.normalize(obs_dict)
 
         # Encode observations to memory context (single frame)
-        memory, memory_pos = self.encode_observations(nobs)
+        if self.use_interaction_field:
+            context = self.encode_observations(nobs, return_context=True)
+            memory = None
+            memory_pos = None
+        else:
+            context = None
+            memory, memory_pos = self.encode_observations(nobs)
 
         # Sample actions (and pi3 features if enabled)
         sample_output = self.conditional_sample(
             memory=memory,
             memory_pos=memory_pos,
+            context=context,
             **self.kwargs,
         )
 
@@ -1294,7 +1476,13 @@ class GAPPolicy(BasePolicy):
         B = nactions.shape[0]
 
         # Encode observations to memory (single frame)
-        memory, memory_pos = self.encode_observations(nobs)  # [B, N_memory, D]
+        if self.use_interaction_field:
+            context = self.encode_observations(nobs, return_context=True)
+            memory = None
+            memory_pos = None
+        else:
+            context = None
+            memory, memory_pos = self.encode_observations(nobs)  # [B, N_memory, D]
 
         # Sample timesteps
         timesteps = torch.randint(
@@ -1316,6 +1504,7 @@ class GAPPolicy(BasePolicy):
             timestep=timesteps,
             memory=memory,
             memory_pos=memory_pos,
+            context=context,
         )
 
         if self.predict_future_pi3:

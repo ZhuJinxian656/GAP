@@ -63,6 +63,17 @@ policy:
   pi3_grid_height: 17
   pi3_grid_width: 23
 
+  # Optional DINO EEF interaction-field tokens
+  use_interaction_field: false
+  interaction_field:
+    mode: disabled  # disabled | current_eef | action_uv
+    readout: masked_pool
+    grid_height: ${policy.dinov3_grid_height}
+    grid_width: ${policy.dinov3_grid_width}
+    use_pair_token: true
+    append_tokens: true
+    eps: 1.0e-6
+
   # State encoder config
   state_dim: 14
   state_embed_dim: 1024  # Must match DinoV3 embed_dim (1024 for vitl16)
