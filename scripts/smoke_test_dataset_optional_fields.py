@@ -37,8 +37,12 @@ def write_zarr(path: str, include_mask: bool = False, include_interaction: bool 
         dino_eef_valid = np.ones((steps, 1, 2), dtype="float32")
         dino_eef_region_mask = np.zeros((steps, 1, 2, dino_tokens), dtype="float32")
         dino_pair_region_mask = np.zeros((steps, 1, dino_tokens), dtype="float32")
+        dino_action_eef_uv = np.zeros((steps, 1, 2, 2), dtype="float32")
+        dino_action_eef_valid = np.ones((steps, 1, 2), dtype="float32")
         dino_eef_uv[:, :, 0, :] = np.array([1.0, 1.0], dtype="float32")
         dino_eef_uv[:, :, 1, :] = np.array([4.0, 1.0], dtype="float32")
+        dino_action_eef_uv[:, :, 0, :] = np.array([1.5, 1.0], dtype="float32")
+        dino_action_eef_uv[:, :, 1, :] = np.array([4.5, 1.0], dtype="float32")
         dino_eef_region_mask[:, :, 0, :2] = 1.0
         dino_eef_region_mask[:, :, 1, -2:] = 1.0
         dino_pair_region_mask[:, :, 2:4] = 1.0
@@ -46,6 +50,8 @@ def write_zarr(path: str, include_mask: bool = False, include_interaction: bool 
         data.create_dataset("dino_eef_valid", data=dino_eef_valid)
         data.create_dataset("dino_eef_region_mask", data=dino_eef_region_mask)
         data.create_dataset("dino_pair_region_mask", data=dino_pair_region_mask)
+        data.create_dataset("dino_action_eef_uv", data=dino_action_eef_uv)
+        data.create_dataset("dino_action_eef_valid", data=dino_action_eef_valid)
     meta.create_dataset("episode_ends", data=np.array([steps], dtype=np.int64))
 
 
@@ -156,6 +162,24 @@ def main():
         assert "dino_pair_region_mask" in interaction_sample["obs"]
         assert "future_dino_eef_uv_seq" in interaction_sample
         assert "future_dino_eef_valid_seq" in interaction_sample
+
+        action_uv = GAPDataset(
+            zarr_path=zarr_with_mask,
+            horizon=4,
+            pad_before=0,
+            pad_after=0,
+            max_train_episodes=1,
+            use_pi3_features=True,
+            use_interaction_field=True,
+            interaction_field_mode="action_uv",
+        )
+        action_uv_sample = action_uv[0]
+        assert "dino_eef_uv" in action_uv_sample["obs"]
+        assert "dino_eef_valid" in action_uv_sample["obs"]
+        assert "dino_eef_region_mask" in action_uv_sample["obs"]
+        assert "dino_pair_region_mask" in action_uv_sample["obs"]
+        assert "target_dino_eef_uv_seq" in action_uv_sample
+        assert "target_dino_eef_valid_seq" in action_uv_sample
 
         print("dataset optional-field smoke tests passed")
     finally:

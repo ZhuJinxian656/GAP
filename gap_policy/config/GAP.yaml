@@ -73,6 +73,14 @@ policy:
     use_pair_token: true
     append_tokens: true
     eps: 1.0e-6
+    sigma_start: 4.0
+    sigma_end: 1.0
+    pair_sigma_start: 5.0
+    pair_sigma_end: 1.5
+    action_uv_hidden_dim: 512
+    uv_loss_weight: 0.05
+    use_current_eef_fallback: true
+    current_eef_fallback_weight: 0.25
 
   # State encoder config
   state_dim: 14

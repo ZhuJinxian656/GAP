@@ -186,6 +186,7 @@ class GAPPolicyWrapper:
         self.use_interaction_field = bool(policy_cfg.get("use_interaction_field", False))
         interaction_cfg = policy_cfg.get("interaction_field", {})
         self.interaction_field_mode = interaction_cfg.get("mode", "disabled")
+        self.interaction_use_current_eef_fallback = bool(interaction_cfg.get("use_current_eef_fallback", True))
         self.dino_eef_mask_radius_tokens = float(os.environ.get("GAP_DINO_EEF_MASK_RADIUS_TOKENS", "2.5"))
         self.dino_pair_mask_radius_tokens = float(os.environ.get("GAP_DINO_PAIR_MASK_RADIUS_TOKENS", "2.5"))
 
@@ -450,10 +451,8 @@ class GAPPolicyWrapper:
         if self.interaction_field_mode == "current_eef":
             obs_dict.update(self._dino_eef_interaction_fields(rgb_image, raw_observation))
         elif self.interaction_field_mode == "action_uv":
-            raise NotImplementedError(
-                "interaction_field.mode='action_uv' is reserved for action-conditioned "
-                "A_lambda queries and is not implemented in this milestone. Use mode='current_eef'."
-            )
+            if self.interaction_use_current_eef_fallback:
+                obs_dict.update(self._dino_eef_interaction_fields(rgb_image, raw_observation))
         elif self.interaction_field_mode != "disabled":
             raise ValueError(f"Unsupported interaction_field.mode={self.interaction_field_mode!r}.")
 

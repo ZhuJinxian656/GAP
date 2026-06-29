@@ -343,6 +343,73 @@ class TransformerEncoder(nn.Module):
         return output
 
 
+class ActionToUVHead(nn.Module):
+    """Predict action-conditioned left/right EEF UV trajectories on a DINO token grid."""
+
+    def __init__(
+        self,
+        action_dim: int,
+        state_dim: int,
+        horizon: int,
+        hidden_dim: int,
+        num_views: int,
+        grid_height: int,
+        grid_width: int,
+    ):
+        super().__init__()
+        self.horizon = int(horizon)
+        self.num_views = int(num_views)
+        self.grid_height = int(grid_height)
+        self.grid_width = int(grid_width)
+        self.action_mlp = nn.Sequential(
+            nn.Linear(action_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.state_mlp = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.progress_mlp = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.horizon_pos_embed = nn.Parameter(torch.randn(self.horizon, hidden_dim) * 0.02)
+        self.output = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_dim, self.num_views * 2 * 2),
+        )
+
+    def forward(
+        self,
+        mid_actions: torch.Tensor,
+        agent_pos: torch.Tensor,
+        progress: torch.Tensor,
+    ) -> torch.Tensor:
+        if mid_actions.ndim != 3:
+            raise ValueError(f"mid_actions must be shaped [B, H, action_dim], got {tuple(mid_actions.shape)}.")
+        B, H, _ = mid_actions.shape
+        if H > self.horizon:
+            raise ValueError(f"mid_actions horizon {H} exceeds configured horizon {self.horizon}.")
+
+        progress = progress.to(device=mid_actions.device, dtype=mid_actions.dtype).reshape(B, 1).clamp(0.0, 1.0)
+        action_features = self.action_mlp(mid_actions)
+        state_features = self.state_mlp(agent_pos.to(device=mid_actions.device, dtype=mid_actions.dtype)).unsqueeze(1)
+        progress_features = self.progress_mlp(progress).unsqueeze(1)
+        horizon_features = self.horizon_pos_embed[:H].to(device=mid_actions.device, dtype=mid_actions.dtype).unsqueeze(0)
+
+        logits = self.output(action_features + state_features + progress_features + horizon_features)
+        uv = torch.sigmoid(logits).reshape(B, H, self.num_views, 2, 2)
+        scale = torch.tensor(
+            [max(self.grid_width - 1, 1), max(self.grid_height - 1, 1)],
+            device=mid_actions.device,
+            dtype=mid_actions.dtype,
+        )
+        return uv * scale.view(1, 1, 1, 1, 2)
+
+
 class GAPPolicy(BasePolicy):
 
     def __init__(
@@ -521,15 +588,23 @@ class GAPPolicy(BasePolicy):
         self.interaction_eps = float(self.interaction_cfg.get("eps", 1.0e-6))
         self.interaction_grid_height = int(self.interaction_cfg.get("grid_height", self.dinov3_grid_height))
         self.interaction_grid_width = int(self.interaction_cfg.get("grid_width", self.dinov3_grid_width))
+        self.interaction_sigma_start = float(self.interaction_cfg.get("sigma_start", 4.0))
+        self.interaction_sigma_end = float(self.interaction_cfg.get("sigma_end", 1.0))
+        self.interaction_pair_sigma_start = float(self.interaction_cfg.get("pair_sigma_start", 5.0))
+        self.interaction_pair_sigma_end = float(self.interaction_cfg.get("pair_sigma_end", 1.5))
+        self.interaction_uv_loss_weight = float(self.interaction_cfg.get("uv_loss_weight", 0.05))
+        self.interaction_use_current_eef_fallback = bool(self.interaction_cfg.get("use_current_eef_fallback", True))
+        self.interaction_current_eef_fallback_weight = float(
+            self.interaction_cfg.get("current_eef_fallback_weight", 0.25)
+        )
+        self.action_to_uv_head = None
         if self.use_interaction_field:
             if self.interaction_mode == "disabled":
-                raise ValueError("use_interaction_field=True requires interaction_field.mode to be current_eef.")
-            if self.interaction_mode == "action_uv":
-                raise NotImplementedError(
-                    "interaction_field.mode='action_uv' is reserved for action-conditioned "
-                    "A_lambda queries and is not implemented in this milestone. Use mode='current_eef'."
+                raise ValueError(
+                    "use_interaction_field=True requires interaction_field.mode to be "
+                    "current_eef or action_uv."
                 )
-            if self.interaction_mode != "current_eef":
+            if self.interaction_mode not in ("current_eef", "action_uv"):
                 raise ValueError(
                     f"Unsupported interaction_field.mode={self.interaction_mode!r}. "
                     "Expected disabled, current_eef, or action_uv."
@@ -549,6 +624,16 @@ class GAPPolicy(BasePolicy):
                 )
             self.interaction_type_embed = nn.Embedding(3, self.feature_dim)
             self.interaction_pos_embed = nn.Embedding(3, self.feature_dim)
+            if self.interaction_mode == "action_uv":
+                self.action_to_uv_head = ActionToUVHead(
+                    action_dim=action_dim,
+                    state_dim=state_dim,
+                    horizon=horizon,
+                    hidden_dim=int(self.interaction_cfg.get("action_uv_hidden_dim", 512)),
+                    num_views=dinov3_num_views,
+                    grid_height=self.interaction_grid_height,
+                    grid_width=self.interaction_grid_width,
+                )
 
         # CLS token (learnable global context token)
         self.cls_token = nn.Parameter(torch.randn(1, 1, self.feature_dim))
@@ -760,19 +845,11 @@ class GAPPolicy(BasePolicy):
         denom = mask_flat.sum(dim=1, keepdim=True).clamp_min(self.interaction_eps)
         return (tokens * mask_flat.unsqueeze(-1)).sum(dim=1) / denom
 
-    def _compute_current_eef_interaction_tokens(
+    def _current_eef_masks_from_obs(
         self,
         dinov3_tokens: torch.Tensor,
         obs_dict: Dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.interaction_mode == "action_uv":
-            raise NotImplementedError(
-                "interaction_field.mode='action_uv' is reserved for action-conditioned "
-                "A_lambda queries and is not implemented in this milestone. Use mode='current_eef'."
-            )
-        if self.interaction_mode != "current_eef":
-            raise ValueError(f"Unsupported interaction_field.mode={self.interaction_mode!r}.")
-
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         required = (
             "dino_eef_uv",
             "dino_eef_valid",
@@ -806,6 +883,17 @@ class GAPPolicy(BasePolicy):
 
         left_mask = eef_mask[:, :, 0, :] * eef_valid[:, :, 0:1]
         right_mask = eef_mask[:, :, 1, :] * eef_valid[:, :, 1:2]
+        both_valid = eef_valid[:, :, 0] * eef_valid[:, :, 1]
+        pair_mask = pair_mask * both_valid.unsqueeze(-1)
+        return left_mask, right_mask, pair_mask
+
+    def _interaction_tokens_from_masks(
+        self,
+        dinov3_tokens: torch.Tensor,
+        left_mask: torch.Tensor,
+        right_mask: torch.Tensor,
+        pair_mask: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         pooled_tokens = [
             self._masked_pool_tokens(dinov3_tokens, left_mask),
             self._masked_pool_tokens(dinov3_tokens, right_mask),
@@ -813,8 +901,9 @@ class GAPPolicy(BasePolicy):
         type_ids = [0, 1]
 
         if self.interaction_use_pair_token:
-            both_valid = eef_valid[:, :, 0] * eef_valid[:, :, 1]
-            pooled_tokens.append(self._masked_pool_tokens(dinov3_tokens, pair_mask * both_valid.unsqueeze(-1)))
+            if pair_mask is None:
+                raise ValueError("Pair interaction token is enabled but pair_mask is None.")
+            pooled_tokens.append(self._masked_pool_tokens(dinov3_tokens, pair_mask))
             type_ids.append(2)
 
         token_tensor = torch.stack(pooled_tokens, dim=1)
@@ -823,18 +912,173 @@ class GAPPolicy(BasePolicy):
         pos_tensor = self.interaction_pos_embed(type_ids_tensor).unsqueeze(0).expand(dinov3_tokens.shape[0], -1, -1)
         return token_tensor, pos_tensor
 
+    def _token_grid_xy(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        yy, xx = torch.meshgrid(
+            torch.arange(self.interaction_grid_height, device=device, dtype=dtype),
+            torch.arange(self.interaction_grid_width, device=device, dtype=dtype),
+            indexing="ij",
+        )
+        grid = torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=-1)
+        return grid.view(1, 1, 1, -1, 2).expand(batch_size, -1, -1, -1, -1)
+
+    def _interaction_progress(
+        self,
+        timestep: torch.Tensor,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if timestep.ndim == 0:
+            timestep = timestep.expand(batch_size)
+        timestep = timestep.to(device=device, dtype=dtype).reshape(batch_size)
+        max_train_timesteps = float(getattr(self.noise_scheduler.config, "num_train_timesteps", 100))
+        return (1.0 - timestep / max(max_train_timesteps, 1.0)).clamp(0.0, 1.0)
+
+    def _sigma_from_progress(self, progress: torch.Tensor, start: float, end: float) -> torch.Tensor:
+        return end + (1.0 - progress) * (start - end)
+
+    def _gaussian_masks_from_uv(
+        self,
+        pred_uv: torch.Tensor,
+        valid: Optional[torch.Tensor] = None,
+        sigma: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if pred_uv.ndim != 5 or pred_uv.shape[-2:] != (2, 2):
+            raise ValueError(f"pred_uv must be shaped [B, H, V, 2, 2], got {tuple(pred_uv.shape)}.")
+        B = pred_uv.shape[0]
+        grid = self._token_grid_xy(B, pred_uv.device, pred_uv.dtype)
+        if sigma is None:
+            sigma = torch.ones(B, device=pred_uv.device, dtype=pred_uv.dtype)
+        sigma = sigma.to(device=pred_uv.device, dtype=pred_uv.dtype).reshape(B, 1, 1, 1).clamp_min(self.interaction_eps)
+        valid_t = None
+        if valid is not None:
+            valid_t = valid.to(device=pred_uv.device, dtype=pred_uv.dtype).clamp(0.0, 1.0)
+
+        masks = []
+        for arm_idx in (0, 1):
+            arm_uv = pred_uv[:, :, :, arm_idx, :].unsqueeze(-2)
+            dist2 = (grid - arm_uv).pow(2).sum(dim=-1)
+            mask = torch.exp(-0.5 * dist2 / sigma.pow(2))
+            if valid_t is not None:
+                mask = mask * valid_t[:, :, :, arm_idx].unsqueeze(-1)
+            masks.append(mask.amax(dim=1))
+        return masks[0], masks[1]
+
+    def _pair_masks_from_uv(
+        self,
+        pred_uv: torch.Tensor,
+        valid: Optional[torch.Tensor] = None,
+        sigma: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if pred_uv.ndim != 5 or pred_uv.shape[-2:] != (2, 2):
+            raise ValueError(f"pred_uv must be shaped [B, H, V, 2, 2], got {tuple(pred_uv.shape)}.")
+        B = pred_uv.shape[0]
+        grid = self._token_grid_xy(B, pred_uv.device, pred_uv.dtype)
+        if sigma is None:
+            sigma = torch.ones(B, device=pred_uv.device, dtype=pred_uv.dtype)
+        sigma = sigma.to(device=pred_uv.device, dtype=pred_uv.dtype).reshape(B, 1, 1, 1).clamp_min(self.interaction_eps)
+
+        left = pred_uv[:, :, :, 0, :]
+        right = pred_uv[:, :, :, 1, :]
+        segment = right - left
+        length2 = segment.pow(2).sum(dim=-1, keepdim=True).clamp_min(self.interaction_eps)
+        point_delta = grid - left.unsqueeze(-2)
+        t = (point_delta * segment.unsqueeze(-2)).sum(dim=-1) / length2
+        t = t.clamp(0.0, 1.0)
+        closest = left.unsqueeze(-2) + t.unsqueeze(-1) * segment.unsqueeze(-2)
+        dist2 = (grid - closest).pow(2).sum(dim=-1)
+        mask = torch.exp(-0.5 * dist2 / sigma.pow(2))
+        if valid is not None:
+            valid_t = valid.to(device=pred_uv.device, dtype=pred_uv.dtype).clamp(0.0, 1.0)
+            both_valid = valid_t[:, :, :, 0] * valid_t[:, :, :, 1]
+            mask = mask * both_valid.unsqueeze(-1)
+        return mask.amax(dim=1)
+
+    def _compute_current_eef_interaction_tokens(
+        self,
+        dinov3_tokens: torch.Tensor,
+        obs_dict: Dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.interaction_mode != "current_eef":
+            raise ValueError(f"Unsupported interaction_field.mode={self.interaction_mode!r}.")
+        left_mask, right_mask, pair_mask = self._current_eef_masks_from_obs(dinov3_tokens, obs_dict)
+        return self._interaction_tokens_from_masks(dinov3_tokens, left_mask, right_mask, pair_mask)
+
+    def _compute_interaction_tokens(
+        self,
+        dinov3_tokens: torch.Tensor,
+        obs_dict: Dict[str, torch.Tensor],
+        mid_actions: Optional[torch.Tensor] = None,
+        timestep: Optional[torch.Tensor] = None,
+        agent_pos: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        if self.interaction_mode == "current_eef":
+            left_mask, right_mask, pair_mask = self._current_eef_masks_from_obs(dinov3_tokens, obs_dict)
+            tokens, pos = self._interaction_tokens_from_masks(dinov3_tokens, left_mask, right_mask, pair_mask)
+            return tokens, pos, {}
+
+        if self.interaction_mode != "action_uv":
+            raise ValueError(f"Unsupported interaction_field.mode={self.interaction_mode!r}.")
+        if self.action_to_uv_head is None:
+            raise RuntimeError("interaction_field.mode='action_uv' requires ActionToUVHead to be initialized.")
+        if mid_actions is None or timestep is None or agent_pos is None:
+            raise ValueError("action_uv interaction field requires mid_actions, timestep, and agent_pos.")
+
+        B = dinov3_tokens.shape[0]
+        progress = self._interaction_progress(timestep, B, mid_actions.device, mid_actions.dtype)
+        pred_uv = self.action_to_uv_head(mid_actions, agent_pos, progress)
+        sigma = self._sigma_from_progress(
+            progress,
+            self.interaction_sigma_start,
+            self.interaction_sigma_end,
+        )
+        pair_sigma = self._sigma_from_progress(
+            progress,
+            self.interaction_pair_sigma_start,
+            self.interaction_pair_sigma_end,
+        )
+        left_mask, right_mask = self._gaussian_masks_from_uv(pred_uv, sigma=sigma)
+        pair_mask = self._pair_masks_from_uv(pred_uv, sigma=pair_sigma) if self.interaction_use_pair_token else None
+
+        if self.interaction_use_current_eef_fallback:
+            current_left, current_right, current_pair = self._current_eef_masks_from_obs(dinov3_tokens, obs_dict)
+            fallback_weight = self.interaction_current_eef_fallback_weight
+            left_mask = torch.maximum(left_mask, fallback_weight * current_left)
+            right_mask = torch.maximum(right_mask, fallback_weight * current_right)
+            if pair_mask is not None:
+                pair_mask = torch.maximum(pair_mask, fallback_weight * current_pair)
+
+        tokens, pos = self._interaction_tokens_from_masks(dinov3_tokens, left_mask, right_mask, pair_mask)
+        aux = {
+            "pred_uv": pred_uv,
+            "left_mask": left_mask,
+            "right_mask": right_mask,
+            "progress": progress,
+        }
+        if pair_mask is not None:
+            aux["pair_mask"] = pair_mask
+        return tokens, pos, aux
+
     def _append_interaction_tokens(
         self,
         memory: torch.Tensor,
         memory_pos: torch.Tensor,
         context: Dict[str, Any],
+        mid_actions: Optional[torch.Tensor] = None,
+        timestep: Optional[torch.Tensor] = None,
+        agent_pos: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.use_interaction_field or not self.interaction_append_tokens:
+            context["interaction_aux"] = {}
             return memory, memory_pos
-        interaction_tokens, interaction_pos = self._compute_current_eef_interaction_tokens(
+        interaction_tokens, interaction_pos, aux = self._compute_interaction_tokens(
             context["dinov3_tokens"],
             context["obs_dict"],
+            mid_actions=mid_actions,
+            timestep=timestep,
+            agent_pos=agent_pos,
         )
+        context["interaction_aux"] = aux
         memory = torch.cat([memory, interaction_tokens], dim=1)
         memory_pos = torch.cat([memory_pos, interaction_pos], dim=1)
         return memory, memory_pos
@@ -1263,7 +1507,14 @@ class GAPPolicy(BasePolicy):
         if context is not None:
             memory = context["memory"]
             memory_pos = context["memory_pos"]
-            memory, memory_pos = self._append_interaction_tokens(memory, memory_pos, context)
+            memory, memory_pos = self._append_interaction_tokens(
+                memory,
+                memory_pos,
+                context,
+                mid_actions=noised_actions,
+                timestep=timestep,
+                agent_pos=context["agent_pos"],
+            )
         if memory is None or memory_pos is None:
             raise ValueError("forward_diffusion requires memory/memory_pos or context.")
 
@@ -1453,6 +1704,49 @@ class GAPPolicy(BasePolicy):
     def set_normalizer(self, normalizer: LinearNormalizer):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
+    def _action_uv_supervision_loss(
+        self,
+        batch: Dict[str, Any],
+        aux: Dict[str, torch.Tensor],
+    ) -> tuple[Optional[torch.Tensor], Dict[str, float]]:
+        if self.interaction_mode != "action_uv" or "pred_uv" not in aux:
+            return None, {}
+        if "target_dino_eef_uv_seq" not in batch or "target_dino_eef_valid_seq" not in batch:
+            return None, {}
+
+        pred_uv = aux["pred_uv"]
+        target_uv = batch["target_dino_eef_uv_seq"].to(device=pred_uv.device, dtype=pred_uv.dtype)
+        valid = batch["target_dino_eef_valid_seq"].to(device=pred_uv.device, dtype=pred_uv.dtype)
+        if target_uv.ndim != 5 or target_uv.shape[-2:] != (2, 2):
+            raise ValueError(
+                "target_dino_eef_uv_seq must be shaped [B, H, V, 2, 2], "
+                f"got {tuple(target_uv.shape)}."
+            )
+        if valid.ndim != 4 or valid.shape[-1] != 2:
+            raise ValueError(
+                "target_dino_eef_valid_seq must be shaped [B, H, V, 2], "
+                f"got {tuple(valid.shape)}."
+            )
+        if target_uv.shape[:4] != pred_uv.shape[:4] or valid.shape != pred_uv.shape[:4]:
+            raise ValueError(
+                "Action UV target shapes must align with predicted UV, got "
+                f"pred={tuple(pred_uv.shape)}, target={tuple(target_uv.shape)}, valid={tuple(valid.shape)}."
+            )
+
+        valid = valid.clamp(0.0, 1.0)
+        per_point_loss = (pred_uv - target_uv).pow(2).mean(dim=-1)
+        denom = valid.sum().clamp_min(1.0)
+        uv_loss = (per_point_loss * valid).sum() / denom
+        metrics = {
+            "uv_loss": float(uv_loss.detach().item()),
+            "uv_loss_weight": self.interaction_uv_loss_weight,
+            "pred_uv_mean": float(pred_uv.detach().mean().item()),
+            "pred_uv_std": float(pred_uv.detach().std().item()),
+        }
+        if "progress" in aux:
+            metrics["interaction_progress_mean"] = float(aux["progress"].detach().mean().item())
+        return uv_loss, metrics
+
     def compute_loss(self, batch):
         """
         Compute diffusion loss (single frame per batch)
@@ -1572,6 +1866,14 @@ class GAPPolicy(BasePolicy):
             loss_dict["future_loss"] = 0.0
             loss_dict["future_loss_mode"] = "none"
             loss_dict["total_loss"] = loss.item()
+
+        if self.interaction_mode == "action_uv":
+            aux = context.get("interaction_aux", {}) if context is not None else {}
+            uv_loss, uv_metrics = self._action_uv_supervision_loss(batch, aux)
+            if uv_loss is not None:
+                loss = loss + self.interaction_uv_loss_weight * uv_loss
+                loss_dict.update(uv_metrics)
+                loss_dict["total_loss"] = loss.item()
 
         return loss, loss_dict
 

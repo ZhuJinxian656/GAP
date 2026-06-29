@@ -148,7 +148,7 @@ def masks_for_episode(
     token_grid: tuple[int, int],
     radius_tokens: float,
     pair_radius_tokens: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, float]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, float]]:
     with h5py.File(hdf5_path, "r") as f:
         cam_group = f["observation"][camera]
         intrinsics = cam_group["intrinsic_cv"][:]
@@ -161,21 +161,39 @@ def masks_for_episode(
 
         token_uvs = []
         visibilities = []
+        action_token_uvs = []
+        action_visibilities = []
         arm_masks = []
         for side in ("left", "right"):
-            points = f["endpose"][f"{side}_endpose"][:num_zarr_steps, :3]
+            endpose = f["endpose"][f"{side}_endpose"][:, :3]
+
+            points = endpose[:num_zarr_steps]
             uv, valid = project_points(points, intrinsics[:num_zarr_steps], extrinsics[:num_zarr_steps])
             visible = in_image_mask(uv, valid, image_size)
             token_uv = pixel_uv_to_token_uv(uv, image_size, token_grid)
             token_uv[~visible] = 0.0
             mask = disk_token_mask(token_uv, visible, token_grid, radius_tokens)
 
+            action_points = endpose[1:num_zarr_steps + 1]
+            action_uv, action_valid = project_points(
+                action_points,
+                intrinsics[1:num_zarr_steps + 1],
+                extrinsics[1:num_zarr_steps + 1],
+            )
+            action_visible = in_image_mask(action_uv, action_valid, image_size)
+            action_token_uv = pixel_uv_to_token_uv(action_uv, image_size, token_grid)
+            action_token_uv[~action_visible] = 0.0
+
             token_uvs.append(token_uv)
             visibilities.append(visible)
+            action_token_uvs.append(action_token_uv)
+            action_visibilities.append(action_visible)
             arm_masks.append(mask)
 
     dino_eef_uv = np.stack(token_uvs, axis=1).astype(np.float32)
     dino_eef_valid = np.stack(visibilities, axis=1).astype(np.float32)
+    dino_action_eef_uv = np.stack(action_token_uvs, axis=1).astype(np.float32)
+    dino_action_eef_valid = np.stack(action_visibilities, axis=1).astype(np.float32)
     dino_eef_region_mask = np.stack(arm_masks, axis=1).astype(np.float32)
     dino_pair_region_mask = segment_token_mask(
         token_uvs[0],
@@ -191,11 +209,22 @@ def masks_for_episode(
         "right_visible_fraction": float(visibilities[1].mean()),
         "either_visible_fraction": float(np.logical_or(visibilities[0], visibilities[1]).mean()),
         "both_visible_fraction": float(np.logical_and(visibilities[0], visibilities[1]).mean()),
+        "action_left_visible_fraction": float(action_visibilities[0].mean()),
+        "action_right_visible_fraction": float(action_visibilities[1].mean()),
+        "action_both_visible_fraction": float(np.logical_and(action_visibilities[0], action_visibilities[1]).mean()),
         "left_token_fraction": float(dino_eef_region_mask[:, 0].mean()),
         "right_token_fraction": float(dino_eef_region_mask[:, 1].mean()),
         "pair_token_fraction": float(dino_pair_region_mask.mean()),
     }
-    return dino_eef_uv, dino_eef_valid, dino_eef_region_mask, dino_pair_region_mask, stats
+    return (
+        dino_eef_uv,
+        dino_eef_valid,
+        dino_eef_region_mask,
+        dino_pair_region_mask,
+        dino_action_eef_uv,
+        dino_action_eef_valid,
+        stats,
+    )
 
 
 def parse_token_grid(value: str) -> tuple[int, int]:
@@ -309,6 +338,8 @@ def main() -> None:
     all_valid = []
     all_arm_masks = []
     all_pair_masks = []
+    all_action_uv = []
+    all_action_valid = []
     per_episode_stats = []
     prev_end = 0
     vis_written = 0
@@ -317,7 +348,7 @@ def main() -> None:
         idx = episode_index(path)
         expected_len = int(episode_ends[idx] - prev_end)
         prev_end = int(episode_ends[idx])
-        uv, valid, arm_mask, pair_mask, stats = masks_for_episode(
+        uv, valid, arm_mask, pair_mask, action_uv, action_valid, stats = masks_for_episode(
             path,
             args.camera,
             token_grid,
@@ -332,6 +363,8 @@ def main() -> None:
         all_valid.append(valid)
         all_arm_masks.append(arm_mask)
         all_pair_masks.append(pair_mask)
+        all_action_uv.append(action_uv)
+        all_action_valid.append(action_valid)
         per_episode_stats.append(stats)
         if vis_dir is not None and vis_written < args.vis_count:
             vis_written += write_episode_previews(
@@ -350,11 +383,15 @@ def main() -> None:
     dino_eef_valid = np.concatenate(all_valid, axis=0).reshape(expected_steps, 1, 2)
     dino_eef_region_mask = np.concatenate(all_arm_masks, axis=0).reshape(expected_steps, 1, 2, num_tokens)
     dino_pair_region_mask = np.concatenate(all_pair_masks, axis=0).reshape(expected_steps, 1, num_tokens)
+    dino_action_eef_uv = np.concatenate(all_action_uv, axis=0).reshape(expected_steps, 1, 2, 2)
+    dino_action_eef_valid = np.concatenate(all_action_valid, axis=0).reshape(expected_steps, 1, 2)
 
     write_dataset(data, "dino_eef_uv", dino_eef_uv, (100, 1, 2, 2), args.overwrite)
     write_dataset(data, "dino_eef_valid", dino_eef_valid, (100, 1, 2), args.overwrite)
     write_dataset(data, "dino_eef_region_mask", dino_eef_region_mask, (100, 1, 2, num_tokens), args.overwrite)
     write_dataset(data, "dino_pair_region_mask", dino_pair_region_mask, (100, 1, num_tokens), args.overwrite)
+    write_dataset(data, "dino_action_eef_uv", dino_action_eef_uv, (100, 1, 2, 2), args.overwrite)
+    write_dataset(data, "dino_action_eef_valid", dino_action_eef_valid, (100, 1, 2), args.overwrite)
 
     mean_stats = {
         key: float(np.mean([stats[key] for stats in per_episode_stats]))
@@ -366,6 +403,8 @@ def main() -> None:
     print(f"dino_eef_valid shape: {dino_eef_valid.shape}")
     print(f"dino_eef_region_mask shape: {dino_eef_region_mask.shape}")
     print(f"dino_pair_region_mask shape: {dino_pair_region_mask.shape}")
+    print(f"dino_action_eef_uv shape: {dino_action_eef_uv.shape}")
+    print(f"dino_action_eef_valid shape: {dino_action_eef_valid.shape}")
     print("mean stats:")
     for key, value in mean_stats.items():
         print(f"  {key}: {value:.4f}")

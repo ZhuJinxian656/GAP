@@ -71,6 +71,10 @@ class GAPDataset(BaseDataset):
             "dino_eef_region_mask",
             "dino_pair_region_mask",
         ]
+        self.action_interaction_field_keys = [
+            "dino_action_eef_uv",
+            "dino_action_eef_valid",
+        ]
 
         # Make path relative to this file
         current_file_path = os.path.abspath(__file__)
@@ -98,6 +102,8 @@ class GAPDataset(BaseDataset):
         if self.use_interaction_field:
             if self.interaction_field_mode in ("current_eef", "action_uv"):
                 keys.extend(self.interaction_field_keys)
+                if self.interaction_field_mode == "action_uv":
+                    keys.extend(self.action_interaction_field_keys)
             elif self.interaction_field_mode != "disabled":
                 raise ValueError(
                     "Unsupported interaction_field_mode="
@@ -125,6 +131,12 @@ class GAPDataset(BaseDataset):
                         f"{key!r} is required by use_interaction_field=True "
                         f"with interaction_field_mode={self.interaction_field_mode!r}. "
                         "Run scripts/generate_dino_eef_region_masks.py for this zarr first."
+                    )
+                elif key in self.action_interaction_field_keys:
+                    reasons.append(
+                        f"{key!r} is required by interaction_field_mode='action_uv'. "
+                        "Regenerate masks with scripts/generate_dino_eef_region_masks.py "
+                        "so action-aligned EEF UV targets are available."
                     )
                 else:
                     reasons.append(f"{key!r} is required by the GAP dataset configuration.")
@@ -189,6 +201,9 @@ class GAPDataset(BaseDataset):
         if self.use_interaction_field and self.interaction_field_mode in ("current_eef", "action_uv"):
             for key in self.interaction_field_keys:
                 print(f"  Interaction field {key} shape: {self.replay_buffer[key].shape}")
+            if self.interaction_field_mode == "action_uv":
+                for key in self.action_interaction_field_keys:
+                    print(f"  Interaction field {key} shape: {self.replay_buffer[key].shape}")
 
     def get_validation_dataset(self):
         """Create validation dataset with same parameters"""
@@ -227,6 +242,9 @@ class GAPDataset(BaseDataset):
         if self.use_interaction_field and self.interaction_field_mode in ("current_eef", "action_uv"):
             for key in self.interaction_field_keys:
                 normalizer[key] = self._get_identity_normalizer()
+            if self.interaction_field_mode == "action_uv":
+                for key in self.action_interaction_field_keys:
+                    normalizer[key] = self._get_identity_normalizer()
 
         return normalizer
 
@@ -322,6 +340,9 @@ class GAPDataset(BaseDataset):
         if use_dino_interaction:
             data["future_dino_eef_uv_seq"] = sample["dino_eef_uv"].astype(np.float32)
             data["future_dino_eef_valid_seq"] = sample["dino_eef_valid"].astype(np.float32)
+            if self.interaction_field_mode == "action_uv":
+                data["target_dino_eef_uv_seq"] = sample["dino_action_eef_uv"].astype(np.float32)
+                data["target_dino_eef_valid_seq"] = sample["dino_action_eef_valid"].astype(np.float32)
 
         for key in self.mask_keys:
             data[f"future_{key}"] = obs_dict.pop(f"future_{key}")
