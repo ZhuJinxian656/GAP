@@ -37,10 +37,14 @@ targets=(
   "fair_diffusion_action_uv_auto|gap_gate_fair_diff_auv|checkpoints/${TASK_NAME}_${SETTING}_fair_diffusion_action_uv_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt|${SETTING}_fair_diffusion_action_uv_seed${SEED}|auto|4"
   "fair_flow_dino_only_auto|gap_gate_fair_flow_dino|checkpoints/${TASK_NAME}_${SETTING}_fair_flow_dino_only_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt|${SETTING}_fair_flow_dino_only_seed${SEED}|auto|5"
   "fair_flow_action_uv_auto|gap_gate_fair_flow_auv|checkpoints/${TASK_NAME}_${SETTING}_fair_flow_action_uv_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt|${SETTING}_fair_flow_action_uv_seed${SEED}|auto|6"
+  "fair_flow_current_eef_auto|gap_gate_fair_flow_ceef|checkpoints/${TASK_NAME}_${SETTING}_fair_flow_current_eef_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt|${SETTING}_fair_flow_current_eef_seed${SEED}|auto|0"
+  "fair_flow_action_uv_flow_interp_auto|gap_gate_flow_interp|checkpoints/${TASK_NAME}_${SETTING}_fair_flow_action_uv_flow_interp_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt|${SETTING}_fair_flow_action_uv_flow_interp_seed${SEED}|auto|1"
+  "fair_flow_action_uv_clean_only_auto|gap_gate_clean_only|checkpoints/${TASK_NAME}_${SETTING}_fair_flow_action_uv_clean_only_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt|${SETTING}_fair_flow_action_uv_clean_only_seed${SEED}|auto|2"
+  "fair_flow_action_uv_none_auto|gap_gate_uv_none|checkpoints/${TASK_NAME}_${SETTING}_fair_flow_action_uv_none_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt|${SETTING}_fair_flow_action_uv_none_seed${SEED}|auto|3"
 )
 
 session_alive() {
-  tmux has-session -t "$1" 2>/dev/null
+  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fxq -- "$1"
 }
 
 result_exists() {

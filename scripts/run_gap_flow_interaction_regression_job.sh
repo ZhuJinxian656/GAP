@@ -176,6 +176,13 @@ case "${JOB}" in
       "policy.interaction_field.mode=action_uv" \
       "policy.interaction_field.uv_supervision_mode=clean_only"
     ;;
+  fair_flow_action_uv_none_auto)
+    train_then_eval "${SETTING}_fair_flow_action_uv_none_seed${SEED}" "fair_flow_action_uv_none" "fair_flow_action_uv_none_auto" \
+      "policy.generative_mode=flow_matching" \
+      "policy.use_interaction_field=true" \
+      "policy.interaction_field.mode=action_uv" \
+      "policy.interaction_field.uv_supervision_mode=none"
+    ;;
   *)
     printf 'Unknown JOB: %s\n' "${JOB}" >&2
     exit 2

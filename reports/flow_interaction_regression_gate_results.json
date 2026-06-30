@@ -10,13 +10,13 @@
     },
     {
       "question": "Q3 fixed flow source under fair recipe",
-      "status": "answered with current fair flow evidence: best flow gate is fair_flow_action_uv_auto at 15/100."
+      "status": "answered with current fair flow evidence: best flow gate is fair_flow_action_uv_clean_only_auto at 17/100; current-EEF control is 14/100."
     }
   ],
   "diagnosis": [
     "Old DINO-only re-eval is close to the 24/100 baseline (24/100), so deploy/eval code is probably okay.",
     "Batch32 DINO-only reproduction recovered (19/100), so the batch256 ablation is not a fair method result.",
-    "Best fair flow gate result so far is fair_flow_action_uv_auto at 15/100."
+    "Best fair flow gate result so far is fair_flow_action_uv_clean_only_auto at 17/100."
   ],
   "existing_baselines": [
     {
@@ -139,49 +139,77 @@
   "regression_gate": [
     {
       "eval_rollouts": 100,
-      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/fair_diffusion_action_uv_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_diffusion_action_uv_seed0/seed_0/200/_result.txt",
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/fair_diffusion_action_uv_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_diffusion_action_uv_seed0/seed_0/200/_result.txt",
       "stage": "fair_diffusion_action_uv_auto",
       "success_count": 19,
       "success_rate": 0.19
     },
     {
       "eval_rollouts": 100,
-      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/fair_diffusion_current_eef_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_diffusion_current_eef_seed0/seed_0/200/_result.txt",
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/fair_diffusion_current_eef_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_diffusion_current_eef_seed0/seed_0/200/_result.txt",
       "stage": "fair_diffusion_current_eef_auto",
       "success_count": 16,
       "success_rate": 0.16
     },
     {
       "eval_rollouts": 100,
-      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/fair_flow_action_uv_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_flow_action_uv_seed0/seed_0/200/_result.txt",
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/fair_flow_action_uv_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_flow_action_uv_seed0/seed_0/200/_result.txt",
       "stage": "fair_flow_action_uv_auto",
       "success_count": 15,
       "success_rate": 0.15
     },
     {
       "eval_rollouts": 100,
-      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/fair_flow_dino_only_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_flow_dino_only_seed0/seed_0/200/_result.txt",
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/fair_flow_action_uv_clean_only_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_flow_action_uv_clean_only_seed0/seed_0/200/_result.txt",
+      "stage": "fair_flow_action_uv_clean_only_auto",
+      "success_count": 17,
+      "success_rate": 0.17
+    },
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/fair_flow_action_uv_flow_interp_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_flow_action_uv_flow_interp_seed0/seed_0/200/_result.txt",
+      "stage": "fair_flow_action_uv_flow_interp_auto",
+      "success_count": 10,
+      "success_rate": 0.1
+    },
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/fair_flow_action_uv_none_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_flow_action_uv_none_seed0/seed_0/200/_result.txt",
+      "stage": "fair_flow_action_uv_none_auto",
+      "success_count": 10,
+      "success_rate": 0.1
+    },
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/fair_flow_current_eef_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_flow_current_eef_seed0/seed_0/200/_result.txt",
+      "stage": "fair_flow_current_eef_auto",
+      "success_count": 14,
+      "success_rate": 0.14
+    },
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/fair_flow_dino_only_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_flow_dino_only_seed0/seed_0/200/_result.txt",
       "stage": "fair_flow_dino_only_auto",
       "success_count": 8,
       "success_rate": 0.08
     },
     {
       "eval_rollouts": 100,
-      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/re_eval_old_dino_auto/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_seed0/seed_0/200/_result.txt",
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/re_eval_old_dino_auto/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_seed0/seed_0/200/_result.txt",
       "stage": "re_eval_old_dino_auto",
       "success_count": 24,
       "success_rate": 0.24
     },
     {
       "eval_rollouts": 100,
-      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/re_eval_old_dino_model/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_seed0/seed_0/200/_result.txt",
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/re_eval_old_dino_model/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_seed0/seed_0/200/_result.txt",
       "stage": "re_eval_old_dino_model",
       "success_count": 24,
       "success_rate": 0.24
     },
     {
       "eval_rollouts": 100,
-      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/train_repro_dino_auto/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_repro_seed0/seed_0/200/_result.txt",
+      "result_path": "/data1/home/zhu_jinxian/project/GAP/results_flow_interaction_regression_gate/train_repro_dino_auto/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_repro_seed0/seed_0/200/_result.txt",
       "stage": "train_repro_dino_auto",
       "success_count": 19,
       "success_rate": 0.19

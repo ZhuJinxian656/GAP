@@ -214,6 +214,7 @@ def decision_gate_status(gate_rows: list[dict[str, Any]]) -> list[dict[str, str]
         "fair_flow_action_uv_expert_final_auto",
         "fair_flow_action_uv_flow_interp_auto",
         "fair_flow_action_uv_clean_only_auto",
+        "fair_flow_action_uv_none_auto",
     }
     fair_flow = [row for row in gate_rows if row.get("stage") in fair_flow_stage_names]
 
