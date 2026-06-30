@@ -1007,34 +1007,75 @@ class GAPPolicy(BasePolicy):
         span = self.flow_lambda_max - self.flow_lambda_min
         return torch.rand(batch_size, device=device, dtype=dtype) * span + self.flow_lambda_min
 
-    def _agent_pos_action_source(
+    def _agent_pos_to_normalized_action_source(
         self,
-        agent_pos: torch.Tensor,
+        raw_agent_pos: torch.Tensor,
         batch_size: int,
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        agent_pos = agent_pos.to(device=device, dtype=dtype)
-        if agent_pos.ndim != 2 or agent_pos.shape[0] != batch_size:
+        raw_agent_pos = raw_agent_pos.to(device=device, dtype=dtype)
+        if raw_agent_pos.ndim != 2 or raw_agent_pos.shape[0] != batch_size:
             raise ValueError(
                 "agent_pos source must be shaped [B, state_dim], "
-                f"got {tuple(agent_pos.shape)} for batch_size={batch_size}."
+                f"got {tuple(raw_agent_pos.shape)} for batch_size={batch_size}."
             )
-        if agent_pos.shape[-1] != self.action_dim:
+        if raw_agent_pos.shape[-1] != self.action_dim:
             raise ValueError(
                 "flow_matching.source_mode='hold' requires agent_pos dim to match action_dim, "
-                f"got agent_pos={agent_pos.shape[-1]} and action_dim={self.action_dim}."
+                f"got agent_pos={raw_agent_pos.shape[-1]} and action_dim={self.action_dim}."
             )
-        return agent_pos.unsqueeze(1).expand(batch_size, self.horizon, self.action_dim).clone()
+        hold_unorm = raw_agent_pos.unsqueeze(1).expand(batch_size, self.horizon, self.action_dim).clone()
+        return self.normalizer["action"].normalize(hold_unorm).to(device=device, dtype=dtype)
+
+    def _previous_action_to_normalized_source(
+        self,
+        raw_previous_action: torch.Tensor,
+        key: str,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        raw_previous_action = raw_previous_action.to(device=device, dtype=dtype)
+        if raw_previous_action.ndim == 2:
+            if raw_previous_action.shape != (batch_size, self.action_dim):
+                raise ValueError(
+                    f"{key} must be shaped [B, action_dim], got {tuple(raw_previous_action.shape)}."
+                )
+            source_unorm = raw_previous_action.unsqueeze(1).expand(batch_size, self.horizon, self.action_dim).clone()
+        elif raw_previous_action.ndim == 3:
+            if raw_previous_action.shape[0] != batch_size or raw_previous_action.shape[-1] != self.action_dim:
+                raise ValueError(
+                    f"{key} must be shaped [B, H, action_dim], got {tuple(raw_previous_action.shape)}."
+                )
+            if raw_previous_action.shape[1] == self.horizon:
+                source_unorm = raw_previous_action.clone()
+            elif raw_previous_action.shape[1] == 1:
+                source_unorm = raw_previous_action.expand(batch_size, self.horizon, self.action_dim).clone()
+            else:
+                raise ValueError(
+                    f"{key} horizon must be 1 or {self.horizon}, got {raw_previous_action.shape[1]}."
+                )
+        else:
+            raise ValueError(f"{key} must be rank 2 or 3, got {tuple(raw_previous_action.shape)}.")
+        return self.normalizer["action"].normalize(source_unorm).to(device=device, dtype=dtype)
 
     def _flow_source_actions(
         self,
-        obs_dict: Optional[Dict[str, torch.Tensor]],
+        raw_obs_dict: Optional[Dict[str, torch.Tensor]],
+        ref_actions: Optional[torch.Tensor],
         batch_size: int,
         device: torch.device,
         dtype: torch.dtype,
         generator=None,
     ) -> torch.Tensor:
+        if ref_actions is not None:
+            expected_shape = (batch_size, self.horizon, self.action_dim)
+            if tuple(ref_actions.shape) != expected_shape:
+                raise ValueError(
+                    "ref_actions must be shaped [B, horizon, action_dim], "
+                    f"got {tuple(ref_actions.shape)} expected {expected_shape}."
+                )
         mode = self.flow_source_mode
         if mode == "zeros":
             source = torch.zeros(batch_size, self.horizon, self.action_dim, device=device, dtype=dtype)
@@ -1049,45 +1090,34 @@ class GAPPolicy(BasePolicy):
             )
         elif mode == "previous_action":
             source = None
-            if obs_dict is not None:
+            if raw_obs_dict is not None:
                 for key in ("previous_action", "prev_action", "last_action"):
-                    prev_action = obs_dict.get(key)
+                    prev_action = raw_obs_dict.get(key)
                     if prev_action is None:
                         continue
-                    prev_action = prev_action.to(device=device, dtype=dtype)
-                    if prev_action.ndim == 2:
-                        if prev_action.shape != (batch_size, self.action_dim):
-                            raise ValueError(
-                                f"{key} must be shaped [B, action_dim], got {tuple(prev_action.shape)}."
-                            )
-                        source = prev_action.unsqueeze(1).expand(batch_size, self.horizon, self.action_dim).clone()
-                    elif prev_action.ndim == 3:
-                        if prev_action.shape[0] != batch_size or prev_action.shape[-1] != self.action_dim:
-                            raise ValueError(
-                                f"{key} must be shaped [B, H, action_dim], got {tuple(prev_action.shape)}."
-                            )
-                        if prev_action.shape[1] == self.horizon:
-                            source = prev_action.clone()
-                        elif prev_action.shape[1] == 1:
-                            source = prev_action.expand(batch_size, self.horizon, self.action_dim).clone()
-                        else:
-                            raise ValueError(
-                                f"{key} horizon must be 1 or {self.horizon}, got {prev_action.shape[1]}."
-                            )
-                    else:
-                        raise ValueError(f"{key} must be rank 2 or 3, got {tuple(prev_action.shape)}.")
+                    source = self._previous_action_to_normalized_source(
+                        prev_action,
+                        key=key,
+                        batch_size=batch_size,
+                        device=device,
+                        dtype=dtype,
+                    )
                     break
             if source is None:
-                if obs_dict is None or "agent_pos" not in obs_dict:
+                if raw_obs_dict is None or "agent_pos" not in raw_obs_dict:
                     raise KeyError(
                         "flow_matching.source_mode='previous_action' needs previous_action/prev_action/last_action "
                         "or agent_pos for hold fallback."
                     )
-                source = self._agent_pos_action_source(obs_dict["agent_pos"], batch_size, device, dtype)
+                source = self._agent_pos_to_normalized_action_source(
+                    raw_obs_dict["agent_pos"], batch_size, device, dtype
+                )
         elif mode == "hold":
-            if obs_dict is None or "agent_pos" not in obs_dict:
+            if raw_obs_dict is None or "agent_pos" not in raw_obs_dict:
                 raise KeyError("flow_matching.source_mode='hold' requires obs['agent_pos'].")
-            source = self._agent_pos_action_source(obs_dict["agent_pos"], batch_size, device, dtype)
+            source = self._agent_pos_to_normalized_action_source(
+                raw_obs_dict["agent_pos"], batch_size, device, dtype
+            )
         else:
             raise ValueError(f"Unsupported flow source mode {mode!r}.")
 
@@ -1844,9 +1874,10 @@ class GAPPolicy(BasePolicy):
         B = memory.shape[0]
         device = memory.device
         dtype = memory.dtype
-        source_obs = context["obs_dict"] if context is not None else None
+        source_obs = context.get("raw_obs_dict") if context is not None else None
         actions = self._flow_source_actions(
-            source_obs,
+            raw_obs_dict=source_obs,
+            ref_actions=None,
             batch_size=B,
             device=device,
             dtype=dtype,
@@ -1899,12 +1930,15 @@ class GAPPolicy(BasePolicy):
         Returns:
             result: dict with 'action' key
         """
+        raw_obs_dict = obs_dict
+
         # Normalize input
         nobs = self.normalizer.normalize(obs_dict)
 
         # Encode observations to memory context (single frame)
         if self.use_interaction_field or self.generative_mode == "flow_matching":
             context = self.encode_observations(nobs, return_context=True)
+            context["raw_obs_dict"] = raw_obs_dict
             memory = None
             memory_pos = None
         else:
@@ -2126,7 +2160,8 @@ class GAPPolicy(BasePolicy):
 
         flow_lambda = self._sample_flow_lambdas(B, nactions.device, nactions.dtype)
         source_actions = self._flow_source_actions(
-            nobs,
+            raw_obs_dict=batch["obs"],
+            ref_actions=nactions,
             batch_size=B,
             device=nactions.device,
             dtype=nactions.dtype,

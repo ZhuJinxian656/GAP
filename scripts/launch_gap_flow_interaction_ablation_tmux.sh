@@ -8,7 +8,7 @@ set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-/data1/home/zhu_jinxian/project/GAP}"
 BWM_BIN="${BWM_BIN:-/data1/home/zhu_jinxian/worldarena-dataengine-research/.conda/BWM/bin}"
-BATCH_SIZE="${BATCH_SIZE:-256}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
 FORMAL_EPOCHS="${FORMAL_EPOCHS:-200}"
 FORMAL_CHECKPOINT_EVERY="${FORMAL_CHECKPOINT_EVERY:-100}"
 SEED="${SEED:-0}"
@@ -24,6 +24,8 @@ MASTER_LOG="logs/gap_flow_interaction_orchestrator.log"
 exec > >(tee -a "$MASTER_LOG") 2>&1
 
 printf '[%s] Flow interaction ablation orchestrator started.\n' "$(date '+%F %T')"
+printf '[%s] WARNING: previous six-way eval with BATCH_SIZE=256 is not comparable with old batch32 baselines. Use BATCH_SIZE=32 for fair comparisons.\n' \
+  "$(date '+%F %T')"
 printf '[%s] Formal config: epochs=%s checkpoint_every=%s batch_size=%s seed=%s\n' \
   "$(date '+%F %T')" "$FORMAL_EPOCHS" "$FORMAL_CHECKPOINT_EVERY" "$BATCH_SIZE" "$SEED"
 

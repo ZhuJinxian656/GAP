@@ -1,0 +1,190 @@
+{
+  "decision_gate_status": [
+    {
+      "question": "Q1 old DINO-only current eval near 24/100",
+      "status": "answered yes: old DINO-only re-eval is close enough at 24/100."
+    },
+    {
+      "question": "Q2 fresh batch32 DINO-only reproduction",
+      "status": "answered yes: batch32 DINO-only recovered to 19/100; batch256 ablation is confounded."
+    },
+    {
+      "question": "Q3 fixed flow source under fair recipe",
+      "status": "answered with current fair flow evidence: best flow gate is fair_flow_action_uv_auto at 15/100."
+    }
+  ],
+  "diagnosis": [
+    "Old DINO-only re-eval is close to the 24/100 baseline (24/100), so deploy/eval code is probably okay.",
+    "Batch32 DINO-only reproduction recovered (19/100), so the batch256 ablation is not a fair method result.",
+    "Best fair flow gate result so far is fair_flow_action_uv_auto at 15/100."
+  ],
+  "existing_baselines": [
+    {
+      "checkpoint": 200,
+      "eval_rollouts": 100,
+      "group": "existing_baseline_eval100",
+      "notes": "previous eval50 smoke evidence",
+      "result_exists": true,
+      "result_path": "results_dual_shoes_50demo_eval100/place_dual_shoes/GAP/demo_clean/demo_clean/seed_0/200/_result.txt",
+      "seed": 0,
+      "success_count": 8,
+      "success_rate": 0.08,
+      "training_demos": 50,
+      "variant": "vanilla",
+      "wilson_95_ci": [
+        0.04109296948581091,
+        0.14998266879403072
+      ]
+    },
+    {
+      "checkpoint": 200,
+      "eval_rollouts": 100,
+      "group": "existing_baseline_eval100",
+      "notes": "previous eval50 smoke evidence",
+      "result_exists": true,
+      "result_path": "results_dual_shoes_50demo_eval100/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_seed0/seed_0/200/_result.txt",
+      "seed": 0,
+      "success_count": 24,
+      "success_rate": 0.24,
+      "training_demos": 50,
+      "variant": "dino_only",
+      "wilson_95_ci": [
+        0.16691211265459965,
+        0.3323251872329213
+      ]
+    },
+    {
+      "checkpoint": 200,
+      "eval_rollouts": 100,
+      "group": "existing_baseline_eval100",
+      "notes": "previous eval50 smoke evidence",
+      "result_exists": true,
+      "result_path": "results_dual_shoes_50demo_eval100/place_dual_shoes/GAP/demo_clean/demo_clean_pi3_pooled_seed0/seed_0/200/_result.txt",
+      "seed": 0,
+      "success_count": 16,
+      "success_rate": 0.16,
+      "training_demos": 50,
+      "variant": "pi3_pooled",
+      "wilson_95_ci": [
+        0.10095202349473717,
+        0.24420444558894414
+      ]
+    },
+    {
+      "checkpoint": 200,
+      "eval_rollouts": 100,
+      "group": "existing_baseline_eval100",
+      "notes": "EEF proxy, not true object-hand",
+      "result_exists": true,
+      "result_path": "results_dual_shoes_50demo_eval100/place_dual_shoes/GAP/demo_clean/demo_clean_pi3_eef_region_seed0/seed_0/200/_result.txt",
+      "seed": 0,
+      "success_count": 18,
+      "success_rate": 0.18,
+      "training_demos": 50,
+      "variant": "pi3_eef_region",
+      "wilson_95_ci": [
+        0.11700131654251038,
+        0.26667536024213084
+      ]
+    }
+  ],
+  "latest_six_way": [
+    {
+      "eval_rollouts": 100,
+      "success_count": 2,
+      "success_rate": 0.02,
+      "variant": "diffusion + DINO-only"
+    },
+    {
+      "eval_rollouts": 100,
+      "success_count": 4,
+      "success_rate": 0.04,
+      "variant": "diffusion + current_eef"
+    },
+    {
+      "eval_rollouts": 100,
+      "success_count": 3,
+      "success_rate": 0.03,
+      "variant": "diffusion + action_uv"
+    },
+    {
+      "eval_rollouts": 100,
+      "success_count": 1,
+      "success_rate": 0.01,
+      "variant": "flow + DINO-only"
+    },
+    {
+      "eval_rollouts": 100,
+      "success_count": 1,
+      "success_rate": 0.01,
+      "variant": "flow + current_eef"
+    },
+    {
+      "eval_rollouts": 100,
+      "success_count": 1,
+      "success_rate": 0.01,
+      "variant": "flow + action_uv"
+    }
+  ],
+  "optimizer_updates": {
+    "batch256_total_updates": 9000,
+    "batch256_updates_per_epoch": 45,
+    "batch32_total_updates": 72000,
+    "batch32_updates_per_epoch": 360,
+    "batch32_vs_batch256_ratio": 8.0,
+    "epochs": 200,
+    "source": "zarr",
+    "total_steps": 11510
+  },
+  "regression_gate": [
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/fair_diffusion_action_uv_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_diffusion_action_uv_seed0/seed_0/200/_result.txt",
+      "stage": "fair_diffusion_action_uv_auto",
+      "success_count": 19,
+      "success_rate": 0.19
+    },
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/fair_diffusion_current_eef_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_diffusion_current_eef_seed0/seed_0/200/_result.txt",
+      "stage": "fair_diffusion_current_eef_auto",
+      "success_count": 16,
+      "success_rate": 0.16
+    },
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/fair_flow_action_uv_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_flow_action_uv_seed0/seed_0/200/_result.txt",
+      "stage": "fair_flow_action_uv_auto",
+      "success_count": 15,
+      "success_rate": 0.15
+    },
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/fair_flow_dino_only_auto/place_dual_shoes/GAP/demo_clean/demo_clean_fair_flow_dino_only_seed0/seed_0/200/_result.txt",
+      "stage": "fair_flow_dino_only_auto",
+      "success_count": 8,
+      "success_rate": 0.08
+    },
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/re_eval_old_dino_auto/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_seed0/seed_0/200/_result.txt",
+      "stage": "re_eval_old_dino_auto",
+      "success_count": 24,
+      "success_rate": 0.24
+    },
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/re_eval_old_dino_model/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_seed0/seed_0/200/_result.txt",
+      "stage": "re_eval_old_dino_model",
+      "success_count": 24,
+      "success_rate": 0.24
+    },
+    {
+      "eval_rollouts": 100,
+      "result_path": "/data1/home/zhu_jinxian/project/robotwin/results_flow_interaction_regression_gate/train_repro_dino_auto/place_dual_shoes/GAP/demo_clean/demo_clean_dino_only_repro_seed0/seed_0/200/_result.txt",
+      "stage": "train_repro_dino_auto",
+      "success_count": 19,
+      "success_rate": 0.19
+    }
+  ]
+}

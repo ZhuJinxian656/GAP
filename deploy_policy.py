@@ -34,9 +34,15 @@ class GAPPolicyWrapper:
         ckpt_path: str,
         device: str = "cuda",
         debug: bool = False,
+        model_weight: str = "auto",
     ):
         self.device = device
         self.debug = debug
+        self.model_weight = str(model_weight).lower()
+        if self.model_weight not in ("auto", "ema", "model"):
+            raise ValueError(
+                f"model_weight must be one of 'auto', 'ema', or 'model', got {model_weight!r}."
+            )
 
         cprint(f"[GAP] Initializing deployment policy", "cyan")
         cprint(f"[GAP] Device: {device}", "cyan")
@@ -101,15 +107,26 @@ class GAPPolicyWrapper:
             **policy_cfg
         )
 
-        # Load model weights (use EMA if available)
-        if "ema" in ckpt and ckpt["ema"] is not None:
-            cprint(f"[GAP] Loading EMA model weights", "cyan")
-            self.policy_model.load_state_dict(ckpt["ema"])
-        elif "model" in ckpt:
-            cprint(f"[GAP] Loading model weights", "cyan")
-            self.policy_model.load_state_dict(ckpt["model"])
+        # Load model weights. The default 'auto' preserves the old behavior:
+        # prefer EMA weights when present, otherwise fall back to raw model.
+        has_ema = "ema" in ckpt and ckpt["ema"] is not None
+        has_model = "model" in ckpt and ckpt["model"] is not None
+        if self.model_weight == "ema":
+            if not has_ema:
+                raise ValueError(f"Requested model_weight='ema', but checkpoint has no EMA weights: {ckpt_path}")
+            weight_key = "ema"
+        elif self.model_weight == "model":
+            if not has_model:
+                raise ValueError(f"Requested model_weight='model', but checkpoint has no raw model weights: {ckpt_path}")
+            weight_key = "model"
+        elif has_ema:
+            weight_key = "ema"
+        elif has_model:
+            weight_key = "model"
         else:
             raise ValueError("Checkpoint does not contain model weights")
+        cprint(f"[GAP] Loading {weight_key} model weights (model_weight={self.model_weight})", "cyan")
+        self.policy_model.load_state_dict(ckpt[weight_key])
 
         self.policy_model.to(device)
         self.policy_model.eval()
@@ -579,6 +596,7 @@ def get_model(usr_args):
     # Set device
     device = usr_args.get("device", "cuda" if torch.cuda.is_available() else "cpu")
     debug = usr_args.get("debug", False)
+    model_weight = usr_args.get("model_weight", "auto")
 
     # Construct checkpoint path if not provided
     ckpt_path = usr_args.get("ckpt_path", None)
@@ -602,6 +620,7 @@ def get_model(usr_args):
         ckpt_path=ckpt_path,
         device=device,
         debug=debug,
+        model_weight=model_weight,
     )
 
     return policy

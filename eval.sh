@@ -9,6 +9,9 @@ ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-}"
 if [ -z "${ROBOTWIN_ROOT}" ] && [ -f "${GAP_ROOT}/../RoboTwin-cvpr-env/script/eval_policy.py" ]; then
     ROBOTWIN_ROOT="$(cd "${GAP_ROOT}/../RoboTwin-cvpr-env" && pwd)"
 fi
+if [ -z "${ROBOTWIN_ROOT}" ] && [ -f "${GAP_ROOT}/../robotwin/script/eval_policy.py" ]; then
+    ROBOTWIN_ROOT="$(cd "${GAP_ROOT}/../robotwin" && pwd)"
+fi
 
 policy_name="${POLICY_NAME:-GAP}"
 task_name="${1:-${TASK_NAME:-place_dual_shoes}}"
@@ -21,6 +24,7 @@ seed_list="${7:-${SEEDS:-0}}"
 test_num="${8:-${TEST_NUM:-100}}"
 ckpt_path="${CKPT_PATH:-checkpoints/${task_name}_${ckpt_setting}_${expert_data_num}/${checkpoint_num}.ckpt}"
 results_root="${RESULTS_ROOT:-${GAP_ROOT}/results}"
+model_weight="${MODEL_WEIGHT:-auto}"
 
 if [ ! -f "${ROBOTWIN_ROOT}/script/eval_policy.py" ]; then
     printf 'ROBOTWIN_ROOT must contain script/eval_policy.py: %s\n' "${ROBOTWIN_ROOT}" >&2
@@ -55,7 +59,7 @@ cd "${ROBOTWIN_ROOT}"
 printf 'Evaluating GAP policy\n'
 printf '  gap_root=%s robotwin_root=%s\n' "${GAP_ROOT}" "${ROBOTWIN_ROOT}"
 printf '  results_root=%s\n' "${results_root}"
-printf '  task=%s config=%s checkpoint=%s gpu=%s seeds=%s test_num=%s\n' "${task_name}" "${task_config}" "${checkpoint_file}" "${gpu_id}" "${seed_list}" "${test_num}"
+printf '  task=%s config=%s checkpoint=%s gpu=%s seeds=%s test_num=%s model_weight=%s\n' "${task_name}" "${task_config}" "${checkpoint_file}" "${gpu_id}" "${seed_list}" "${test_num}" "${model_weight}"
 
 for seed in "${seeds[@]}"; do
     PYTHONWARNINGS=ignore::UserWarning \
@@ -69,6 +73,7 @@ for seed in "${seeds[@]}"; do
         --seed "${seed}" \
         --checkpoint_num "${checkpoint_num}" \
         --ckpt_path "${checkpoint_file}" \
+        --model_weight "${model_weight}" \
         --test_num "${test_num}"
 
 done
