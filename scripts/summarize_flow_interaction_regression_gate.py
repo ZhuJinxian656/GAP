@@ -207,10 +207,15 @@ def decision_gate_status(gate_rows: list[dict[str, Any]]) -> list[dict[str, str]
     by_stage = gate_by_stage(gate_rows)
     old_auto = by_stage.get("re_eval_old_dino_auto")
     repro = by_stage.get("train_repro_dino_auto")
-    fair_flow = [
-        row for row in gate_rows
-        if row.get("stage") in {"fair_flow_dino_only_auto", "fair_flow_action_uv_auto"}
-    ]
+    fair_flow_stage_names = {
+        "fair_flow_dino_only_auto",
+        "fair_flow_current_eef_auto",
+        "fair_flow_action_uv_auto",
+        "fair_flow_action_uv_expert_final_auto",
+        "fair_flow_action_uv_flow_interp_auto",
+        "fair_flow_action_uv_clean_only_auto",
+    }
+    fair_flow = [row for row in gate_rows if row.get("stage") in fair_flow_stage_names]
 
     if old_auto is None:
         q1 = "pending: re-eval old DINO-only checkpoint with current deploy/eval code."
@@ -230,11 +235,22 @@ def decision_gate_status(gate_rows: list[dict[str, Any]]) -> list[dict[str, str]
     else:
         q2 = f"inconclusive: batch32 DINO-only reached {repro['success_count']}/100."
 
+    current_eef = by_stage.get("fair_flow_current_eef_auto")
     if not fair_flow:
         q3 = "pending: run fair batch32 flow gates after DINO-only reproduction passes."
+    elif current_eef is None:
+        best = max(fair_flow, key=lambda row: row["success_count"])
+        q3 = (
+            f"partial: best flow gate is {best['stage']} at {best['success_count']}/100, "
+            "but fair_flow_current_eef_auto is still missing."
+        )
     else:
         best = max(fair_flow, key=lambda row: row["success_count"])
-        q3 = f"answered with current fair flow evidence: best flow gate is {best['stage']} at {best['success_count']}/100."
+        q3 = (
+            f"answered with current fair flow evidence: best flow gate is {best['stage']} "
+            f"at {best['success_count']}/100; current-EEF control is "
+            f"{current_eef['success_count']}/100."
+        )
 
     return [
         {"question": "Q1 old DINO-only current eval near 24/100", "status": q1},
@@ -285,6 +301,17 @@ def write_report(
     lines.extend(["", "## Decision Gate Status", "", "| question | status |", "| --- | --- |"])
     for row in gate_status:
         lines.append(f"| {row['question']} | {row['status']} |")
+
+    lines.extend(
+        [
+            "",
+            "## Milestone 3D Candidate-UV Context",
+            "",
+            "- `expert_final` supervises every intermediate/noised action candidate toward the final expert action-aligned UV, so it is not fully candidate-consistent for flow matching.",
+            "- `flow_interp` uses the flow lambda to interpolate from current EEF UV to expert final UV, which is a better approximation of the candidate interaction field when true FK-derived candidate UV is unavailable.",
+            "- `fair_flow_current_eef_auto` is required to separate gains from dynamic action-conditioned UV from gains that any EEF-local DINO token gives to flow.",
+        ]
+    )
 
     lines.extend(["", "## Regression Gate Results", "", "| stage | success | result |", "| --- | ---: | --- |"])
     for row in gate_rows:

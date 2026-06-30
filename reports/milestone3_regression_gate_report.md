@@ -20,6 +20,22 @@ Answer three gating questions before interpreting the flow/action-UV ablation:
 
 Conclusion: the earlier six-way batch256 ablation is confounded by recipe/update count and should not be used as method-level evidence. Flow is non-collapsed after the normalization fix, but this single-seed fair recipe still favors diffusion over flow.
 
+## Milestone 3D Candidate-UV Follow-Up
+
+The original `action_uv` auxiliary target is `expert_final`: every intermediate/noised action candidate `A_lambda` is supervised toward the final expert action-aligned UV. That preserves old behavior, but it is not fully candidate-consistent for flow matching because `A_lambda` lies between the current/hold source and the expert action.
+
+Milestone 3D adds `flow_interp` as a candidate-consistent approximation when true FK-derived candidate UV is unavailable:
+
+`UV_lambda = (1 - lambda) * UV_current + lambda * UV_expert`
+
+The follow-up gate must also include `fair_flow_current_eef_auto`. This control determines whether flow/action-UV helps because of dynamic action-conditioned UV, or simply because any EEF-local DINO token improves the flow model.
+
+Optional UV mode sweep stages are supported behind `TRAIN_FLOW_UV_MODE_SWEEP=true`:
+
+- `fair_flow_action_uv_expert_final_auto`
+- `fair_flow_action_uv_flow_interp_auto`
+- `fair_flow_action_uv_clean_only_auto`
+
 ## Code Changes
 
 - `gap_policy/policy/gap.py`

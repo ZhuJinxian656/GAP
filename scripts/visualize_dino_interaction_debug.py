@@ -30,6 +30,10 @@ def parse_timesteps(value: str) -> list[int]:
     return [int(piece.strip()) for piece in value.split(",") if piece.strip()]
 
 
+def parse_float_list(value: str) -> list[float]:
+    return [float(piece.strip()) for piece in value.split(",") if piece.strip()]
+
+
 def decode_rgb_frame(encoded: Any) -> np.ndarray:
     if isinstance(encoded, np.ndarray) and encoded.ndim == 3:
         return encoded.astype(np.uint8)
@@ -243,10 +247,34 @@ def no_checkpoint_visuals(args, root: zarr.Group, episode_ends: np.ndarray, toke
         target_uv = data["dino_action_eef_uv"][idx, 0]
         target_valid = data["dino_action_eef_valid"][idx, 0]
         target_overlay = draw_uv_overlay(rgb, target_uv, target_valid, token_grid, draw_pair=True)
-        current_uv_overlay = draw_uv_overlay(rgb, data["dino_eef_uv"][idx, 0], data["dino_eef_valid"][idx, 0], token_grid)
+        current_uv = data["dino_eef_uv"][idx, 0]
+        current_valid = data["dino_eef_valid"][idx, 0]
+        current_uv_overlay = draw_uv_overlay(rgb, current_uv, current_valid, token_grid)
+        interp_overlays = []
+        interp_summary = []
+        for flow_lambda in parse_float_list(args.flow_lambdas):
+            interp_uv = (1.0 - flow_lambda) * current_uv + flow_lambda * target_uv
+            interp_valid = target_valid * current_valid
+            interp_overlays.append(draw_uv_overlay(rgb, interp_uv, interp_valid, token_grid, draw_pair=True))
+            interp_summary.append(
+                {
+                    "lambda": float(flow_lambda),
+                    "uv": interp_uv.tolist(),
+                    "valid": interp_valid.tolist(),
+                }
+            )
 
         panel = compose_panels(
-            [rgb, pca, clusters, current_overlay, current_pair, current_uv_overlay, target_overlay],
+            [
+                rgb,
+                pca,
+                clusters,
+                current_overlay,
+                current_pair,
+                current_uv_overlay,
+                target_overlay,
+                *interp_overlays,
+            ],
             [
                 "raw RGB",
                 "DINO PCA",
@@ -255,6 +283,7 @@ def no_checkpoint_visuals(args, root: zarr.Group, episode_ends: np.ndarray, toke
                 "current pair mask",
                 "current EEF UV",
                 "action target UV",
+                *[f"interp UV l={flow_lambda:g}" for flow_lambda in parse_float_list(args.flow_lambdas)],
             ],
             cols=3,
         )
@@ -266,8 +295,9 @@ def no_checkpoint_visuals(args, root: zarr.Group, episode_ends: np.ndarray, toke
                 "output": str(out_path),
                 "target_valid": target_valid.tolist(),
                 "target_uv": target_uv.tolist(),
-                "current_valid": data["dino_eef_valid"][idx, 0].tolist(),
-                "current_uv": data["dino_eef_uv"][idx, 0].tolist(),
+                "current_valid": current_valid.tolist(),
+                "current_uv": current_uv.tolist(),
+                "interp_targets": interp_summary,
             }
         )
     return summary
@@ -354,6 +384,7 @@ def checkpoint_visuals(args, root: zarr.Group, episode_ends: np.ndarray, token_g
     rng = np.random.default_rng(args.seed)
     indices = sample_indices(data["dinov3_features"].shape[0], args.num_samples, args.seed)
     timesteps = parse_timesteps(args.timesteps)
+    flow_lambdas = parse_float_list(args.flow_lambdas)
     summary = []
 
     for sample_id, idx in enumerate(indices):
@@ -376,15 +407,49 @@ def checkpoint_visuals(args, root: zarr.Group, episode_ends: np.ndarray, token_g
         action = torch.from_numpy(action_np.astype(np.float32)).to(device)
         nobs = policy.normalizer.normalize(obs)
         naction = policy.normalizer["action"].normalize(action)
-        target_uv = data["dino_action_eef_uv"][idx, 0]
-        target_valid = data["dino_action_eef_valid"][idx, 0]
+        target_uv_seq = data["dino_action_eef_uv"][idx]
+        target_valid_seq = data["dino_action_eef_valid"][idx]
+        horizon_idx = min(max(int(args.horizon_index), 0), target_uv_seq.shape[0] - 1)
+        target_uv = target_uv_seq[horizon_idx, 0]
+        target_valid = target_valid_seq[horizon_idx, 0]
+        current_uv = data["dino_eef_uv"][idx, 0]
+        current_valid = data["dino_eef_valid"][idx, 0]
+        current_overlay = draw_uv_overlay(rgb, current_uv, current_valid, token_grid, draw_pair=True)
+        target_overlay = draw_uv_overlay(rgb, target_uv, target_valid, token_grid, draw_pair=True)
 
-        for timestep in timesteps:
-            timestep_tensor = torch.full((1,), int(timestep), device=device, dtype=torch.long)
-            generator = torch.Generator(device=device)
-            generator.manual_seed(args.seed + idx + int(timestep))
-            noise = torch.randn(naction.shape, device=device, dtype=naction.dtype, generator=generator)
-            noised_actions = policy.noise_scheduler.add_noise(naction, noise, timestep_tensor)
+        if policy.generative_mode == "flow_matching":
+            source_actions = policy._flow_source_actions(
+                raw_obs_dict=obs,
+                ref_actions=naction,
+                batch_size=1,
+                device=naction.device,
+                dtype=naction.dtype,
+            )
+            iterator = [("lambda", float(flow_lambda)) for flow_lambda in flow_lambdas]
+        else:
+            source_actions = None
+            iterator = [("timestep", int(timestep)) for timestep in timesteps]
+
+        for sweep_kind, sweep_value in iterator:
+            if sweep_kind == "lambda":
+                lambda_tensor = torch.full((1,), float(sweep_value), device=device, dtype=naction.dtype)
+                noised_actions = source_actions + lambda_tensor.view(1, 1, 1) * (naction - source_actions)
+                timestep_tensor = policy._flow_lambda_to_timestep(lambda_tensor, 1, device, naction.dtype)
+                interp_uv = (1.0 - float(sweep_value)) * current_uv + float(sweep_value) * target_uv
+                interp_valid = target_valid * current_valid
+                sweep_label = f"l={float(sweep_value):g}"
+                out_suffix = f"lambda_{float(sweep_value):.2f}".replace(".", "p")
+            else:
+                timestep_tensor = torch.full((1,), int(sweep_value), device=device, dtype=torch.long)
+                generator = torch.Generator(device=device)
+                generator.manual_seed(args.seed + idx + int(sweep_value))
+                noise = torch.randn(naction.shape, device=device, dtype=naction.dtype, generator=generator)
+                noised_actions = policy.noise_scheduler.add_noise(naction, noise, timestep_tensor)
+                interp_uv = target_uv
+                interp_valid = target_valid
+                sweep_label = f"t={int(sweep_value)}"
+                out_suffix = f"t_{int(sweep_value):03d}"
+
             with torch.no_grad():
                 context = policy.encode_observations(nobs, return_context=True)
                 _, _, aux = policy._compute_interaction_tokens(
@@ -402,7 +467,7 @@ def checkpoint_visuals(args, root: zarr.Group, episode_ends: np.ndarray, token_g
 
             pred_overlay = draw_uv_overlay(
                 rgb,
-                pred_uv[-1, 0],
+                pred_uv[horizon_idx, 0],
                 np.ones(2, dtype=np.float32),
                 token_grid,
                 draw_pair=True,
@@ -410,13 +475,15 @@ def checkpoint_visuals(args, root: zarr.Group, episode_ends: np.ndarray, token_g
             pred_left = overlay_mask(rgb, left_mask, token_grid, (255, 60, 60), alpha=0.45)
             pred_right = overlay_mask(rgb, right_mask, token_grid, (60, 120, 255), alpha=0.45)
             pred_pair = overlay_mask(rgb, pair_np, token_grid, (60, 220, 120), alpha=0.45)
-            target_overlay = draw_uv_overlay(rgb, target_uv, target_valid, token_grid, draw_pair=True)
+            interp_overlay = draw_uv_overlay(rgb, interp_uv, interp_valid, token_grid, draw_pair=True)
             panel = compose_panels(
-                [rgb, target_overlay, pred_overlay, pred_left, pred_right, pred_pair, pca],
+                [rgb, current_overlay, target_overlay, interp_overlay, pred_overlay, pred_left, pred_right, pred_pair, pca],
                 [
                     "raw RGB",
-                    "target UV",
-                    f"pred UV t={timestep}",
+                    "current UV",
+                    "expert target UV",
+                    f"interp target {sweep_label}",
+                    f"pred UV {sweep_label}",
                     "pred left mask",
                     "pred right mask",
                     "pred pair mask",
@@ -424,22 +491,29 @@ def checkpoint_visuals(args, root: zarr.Group, episode_ends: np.ndarray, token_g
                 ],
                 cols=3,
             )
-            out_path = out_dir / f"sample_{sample_id:03d}_step_{idx:06d}_t_{int(timestep):03d}.png"
+            out_path = out_dir / f"sample_{sample_id:03d}_step_{idx:06d}_{out_suffix}.png"
             save_rgb(out_path, panel)
-            summary.append(
-                {
-                    "step": idx,
-                    "timestep": int(timestep),
-                    "output": str(out_path),
-                    "pred_uv_mean": float(pred_uv.mean()),
-                    "pred_uv_std": float(pred_uv.std()),
-                    "left_mask_mass": float(left_mask.sum()),
-                    "right_mask_mass": float(right_mask.sum()),
-                    "pair_mask_mass": float(pair_np.sum()),
-                    "target_uv": target_uv.tolist(),
-                    "target_valid": target_valid.tolist(),
-                }
-            )
+            row = {
+                "step": idx,
+                "horizon_index": int(horizon_idx),
+                "output": str(out_path),
+                "pred_uv_mean": float(pred_uv.mean()),
+                "pred_uv_std": float(pred_uv.std()),
+                "left_mask_mass": float(left_mask.sum()),
+                "right_mask_mass": float(right_mask.sum()),
+                "pair_mask_mass": float(pair_np.sum()),
+                "current_uv": current_uv.tolist(),
+                "current_valid": current_valid.tolist(),
+                "target_uv": target_uv.tolist(),
+                "target_valid": target_valid.tolist(),
+                "interp_uv": interp_uv.tolist(),
+                "interp_valid": interp_valid.tolist(),
+            }
+            if sweep_kind == "lambda":
+                row["lambda"] = float(sweep_value)
+            else:
+                row["timestep"] = int(sweep_value)
+            summary.append(row)
     return summary
 
 
@@ -454,6 +528,8 @@ def main() -> int:
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--device", default="auto", help="'auto', 'cpu', or a torch device like cuda:0")
     parser.add_argument("--timesteps", default="0,25,50,75,99")
+    parser.add_argument("--flow-lambdas", default="0,0.25,0.5,0.75,1.0")
+    parser.add_argument("--horizon-index", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--kmeans-k", type=int, default=6)
     parser.add_argument("--max-kmeans-iter", type=int, default=20)

@@ -20,6 +20,7 @@ RESULTS_ROOT="${RESULTS_ROOT:-results_flow_interaction_regression_gate}"
 EVAL_OLD_DINO="${EVAL_OLD_DINO:-true}"
 TRAIN_REPRO_DINO="${TRAIN_REPRO_DINO:-true}"
 TRAIN_INTERACTION_FAIR="${TRAIN_INTERACTION_FAIR:-false}"
+TRAIN_FLOW_UV_MODE_SWEEP="${TRAIN_FLOW_UV_MODE_SWEEP:-false}"
 EVAL_AFTER_TRAIN="${EVAL_AFTER_TRAIN:-true}"
 FORCE_TRAIN="${FORCE_TRAIN:-false}"
 
@@ -33,6 +34,7 @@ printf 'Flow/action-UV regression gate\n'
 printf '  root=%s\n' "${ROOT_DIR}"
 printf '  task=%s setting=%s demos=%s seed=%s gpu=%s\n' "${TASK_NAME}" "${SETTING}" "${EXPERT_DATA_NUM}" "${SEED}" "${GPU_ID}"
 printf '  batch_size=%s epochs=%s checkpoint_every=%s test_num=%s\n' "${BATCH_SIZE}" "${EPOCHS}" "${CHECKPOINT_EVERY}" "${TEST_NUM}"
+printf '  train_interaction_fair=%s train_flow_uv_mode_sweep=%s\n' "${TRAIN_INTERACTION_FAIR}" "${TRAIN_FLOW_UV_MODE_SWEEP}"
 printf 'WARNING: previous six-way eval with BATCH_SIZE=256 is not comparable with old batch32 baselines.\n'
 
 if [ "${BATCH_SIZE}" != "32" ]; then
@@ -139,16 +141,47 @@ if [ "${TRAIN_INTERACTION_FAIR}" = "true" ]; then
     "policy.use_interaction_field=false" \
     "policy.interaction_field.mode=disabled"
 
+  run_train "${SETTING}_fair_flow_current_eef_seed${SEED}" "fair_flow_current_eef" \
+    "policy.generative_mode=flow_matching" \
+    "policy.use_interaction_field=true" \
+    "policy.interaction_field.mode=current_eef"
+
   run_train "${SETTING}_fair_flow_action_uv_seed${SEED}" "fair_flow_action_uv" \
     "policy.generative_mode=flow_matching" \
     "policy.use_interaction_field=true" \
     "policy.interaction_field.mode=action_uv"
 
+  if [ "${TRAIN_FLOW_UV_MODE_SWEEP}" = "true" ]; then
+    run_train "${SETTING}_fair_flow_action_uv_expert_final_seed${SEED}" "fair_flow_action_uv_expert_final" \
+      "policy.generative_mode=flow_matching" \
+      "policy.use_interaction_field=true" \
+      "policy.interaction_field.mode=action_uv" \
+      "policy.interaction_field.uv_supervision_mode=expert_final"
+
+    run_train "${SETTING}_fair_flow_action_uv_flow_interp_seed${SEED}" "fair_flow_action_uv_flow_interp" \
+      "policy.generative_mode=flow_matching" \
+      "policy.use_interaction_field=true" \
+      "policy.interaction_field.mode=action_uv" \
+      "policy.interaction_field.uv_supervision_mode=flow_interp"
+
+    run_train "${SETTING}_fair_flow_action_uv_clean_only_seed${SEED}" "fair_flow_action_uv_clean_only" \
+      "policy.generative_mode=flow_matching" \
+      "policy.use_interaction_field=true" \
+      "policy.interaction_field.mode=action_uv" \
+      "policy.interaction_field.uv_supervision_mode=clean_only"
+  fi
+
   if [ "${EVAL_AFTER_TRAIN}" = "true" ]; then
     run_eval "fair_diffusion_current_eef_auto" "checkpoints/${TASK_NAME}_${SETTING}_fair_diffusion_current_eef_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt" "${SETTING}_fair_diffusion_current_eef_seed${SEED}" "auto"
     run_eval "fair_diffusion_action_uv_auto" "checkpoints/${TASK_NAME}_${SETTING}_fair_diffusion_action_uv_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt" "${SETTING}_fair_diffusion_action_uv_seed${SEED}" "auto"
     run_eval "fair_flow_dino_only_auto" "checkpoints/${TASK_NAME}_${SETTING}_fair_flow_dino_only_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt" "${SETTING}_fair_flow_dino_only_seed${SEED}" "auto"
+    run_eval "fair_flow_current_eef_auto" "checkpoints/${TASK_NAME}_${SETTING}_fair_flow_current_eef_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt" "${SETTING}_fair_flow_current_eef_seed${SEED}" "auto"
     run_eval "fair_flow_action_uv_auto" "checkpoints/${TASK_NAME}_${SETTING}_fair_flow_action_uv_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt" "${SETTING}_fair_flow_action_uv_seed${SEED}" "auto"
+    if [ "${TRAIN_FLOW_UV_MODE_SWEEP}" = "true" ]; then
+      run_eval "fair_flow_action_uv_expert_final_auto" "checkpoints/${TASK_NAME}_${SETTING}_fair_flow_action_uv_expert_final_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt" "${SETTING}_fair_flow_action_uv_expert_final_seed${SEED}" "auto"
+      run_eval "fair_flow_action_uv_flow_interp_auto" "checkpoints/${TASK_NAME}_${SETTING}_fair_flow_action_uv_flow_interp_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt" "${SETTING}_fair_flow_action_uv_flow_interp_seed${SEED}" "auto"
+      run_eval "fair_flow_action_uv_clean_only_auto" "checkpoints/${TASK_NAME}_${SETTING}_fair_flow_action_uv_clean_only_seed${SEED}_${EXPERT_DATA_NUM}/${EPOCHS}.ckpt" "${SETTING}_fair_flow_action_uv_clean_only_seed${SEED}" "auto"
+    fi
   fi
 fi
 

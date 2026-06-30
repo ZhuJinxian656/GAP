@@ -143,11 +143,38 @@ case "${JOB}" in
       "policy.use_interaction_field=false" \
       "policy.interaction_field.mode=disabled"
     ;;
+  fair_flow_current_eef_auto)
+    train_then_eval "${SETTING}_fair_flow_current_eef_seed${SEED}" "fair_flow_current_eef" "fair_flow_current_eef_auto" \
+      "policy.generative_mode=flow_matching" \
+      "policy.use_interaction_field=true" \
+      "policy.interaction_field.mode=current_eef"
+    ;;
   fair_flow_action_uv_auto)
     train_then_eval "${SETTING}_fair_flow_action_uv_seed${SEED}" "fair_flow_action_uv" "fair_flow_action_uv_auto" \
       "policy.generative_mode=flow_matching" \
       "policy.use_interaction_field=true" \
       "policy.interaction_field.mode=action_uv"
+    ;;
+  fair_flow_action_uv_expert_final_auto)
+    train_then_eval "${SETTING}_fair_flow_action_uv_expert_final_seed${SEED}" "fair_flow_action_uv_expert_final" "fair_flow_action_uv_expert_final_auto" \
+      "policy.generative_mode=flow_matching" \
+      "policy.use_interaction_field=true" \
+      "policy.interaction_field.mode=action_uv" \
+      "policy.interaction_field.uv_supervision_mode=expert_final"
+    ;;
+  fair_flow_action_uv_flow_interp_auto)
+    train_then_eval "${SETTING}_fair_flow_action_uv_flow_interp_seed${SEED}" "fair_flow_action_uv_flow_interp" "fair_flow_action_uv_flow_interp_auto" \
+      "policy.generative_mode=flow_matching" \
+      "policy.use_interaction_field=true" \
+      "policy.interaction_field.mode=action_uv" \
+      "policy.interaction_field.uv_supervision_mode=flow_interp"
+    ;;
+  fair_flow_action_uv_clean_only_auto)
+    train_then_eval "${SETTING}_fair_flow_action_uv_clean_only_seed${SEED}" "fair_flow_action_uv_clean_only" "fair_flow_action_uv_clean_only_auto" \
+      "policy.generative_mode=flow_matching" \
+      "policy.use_interaction_field=true" \
+      "policy.interaction_field.mode=action_uv" \
+      "policy.interaction_field.uv_supervision_mode=clean_only"
     ;;
   *)
     printf 'Unknown JOB: %s\n' "${JOB}" >&2

@@ -602,10 +602,23 @@ class GAPPolicy(BasePolicy):
         self.interaction_uv_loss_progress_gamma = float(self.interaction_cfg.get("uv_loss_progress_gamma", 2.0))
         self.interaction_uv_loss_min_progress = float(self.interaction_cfg.get("uv_loss_min_progress", 0.05))
         self.interaction_uv_loss_clamp_target = bool(self.interaction_cfg.get("uv_loss_clamp_target", True))
+        self.interaction_uv_supervision_mode = str(self.interaction_cfg.get("uv_supervision_mode", "expert_final"))
+        self.interaction_flow_interp_requires_current_valid = bool(
+            self.interaction_cfg.get("flow_interp_requires_current_valid", True)
+        )
+        self.interaction_flow_interp_use_current_pair = bool(
+            self.interaction_cfg.get("flow_interp_use_current_pair", True)
+        )
         self.interaction_clean_uv_loss_weight = float(self.interaction_cfg.get("clean_uv_loss_weight", 0.05))
         self.interaction_clean_uv_progress = float(self.interaction_cfg.get("clean_uv_progress", 1.0))
         self.interaction_log_stats = bool(self.interaction_cfg.get("log_interaction_stats", True))
         self.action_to_uv_head = None
+        if self.interaction_uv_supervision_mode not in ("expert_final", "flow_interp", "clean_only", "none"):
+            raise ValueError(
+                "Unsupported interaction_field.uv_supervision_mode="
+                f"{self.interaction_uv_supervision_mode!r}. "
+                "Expected expert_final, flow_interp, clean_only, or none."
+            )
         if self.use_interaction_field:
             if self.interaction_mode == "disabled":
                 raise ValueError(
@@ -793,6 +806,8 @@ class GAPPolicy(BasePolicy):
         cprint(f"  State embed dim: {state_embed_dim}", "cyan")
         cprint(f"  Triadic token: {self.use_triadic_token} ({triadic_mode}, dim={self.triadic_dim})", "cyan")
         cprint(f"  Interaction field: {self.use_interaction_field} ({self.interaction_mode})", "cyan")
+        if self.interaction_mode == "action_uv":
+            cprint(f"  Action-UV supervision: {self.interaction_uv_supervision_mode}", "cyan")
         cprint(f"  Encoder depth: {encoder_depth} (Feature encoding)", "cyan")
         cprint(f"  Decoder depth: {decoder_depth} (Action denoising)", "cyan")
         cprint(f"  Action dim: {action_dim}", "cyan")
@@ -2024,6 +2039,99 @@ class GAPPolicy(BasePolicy):
             target_uv[..., 1] = target_uv[..., 1].clamp(0.0, float(self.interaction_grid_height - 1))
         return target_uv, valid, metrics
 
+    def _uv_supervision_mode_id(self, mode: str) -> int:
+        return {
+            "expert_final": 0,
+            "flow_interp": 1,
+            "clean_only": 2,
+            "none": 3,
+        }[mode]
+
+    def _current_uv_tensors(
+        self,
+        batch: Dict[str, Any],
+        pred_uv: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        obs = batch.get("obs", {})
+        required = ("dino_eef_uv", "dino_eef_valid")
+        missing = [key for key in required if key not in obs]
+        if missing:
+            raise KeyError(
+                "uv_supervision_mode='flow_interp' requires current EEF UV obs keys "
+                f"{', '.join(required)}, missing: {', '.join(missing)}."
+            )
+
+        current_uv = obs["dino_eef_uv"].to(device=pred_uv.device, dtype=pred_uv.dtype)
+        current_valid = obs["dino_eef_valid"].to(device=pred_uv.device, dtype=pred_uv.dtype)
+        if current_uv.ndim != 4 or current_uv.shape[-2:] != (2, 2):
+            raise ValueError(f"dino_eef_uv must be shaped [B, V, 2, 2], got {tuple(current_uv.shape)}.")
+        if current_valid.ndim != 3 or current_valid.shape[-1] != 2:
+            raise ValueError(f"dino_eef_valid must be shaped [B, V, 2], got {tuple(current_valid.shape)}.")
+        if current_uv.shape[0] != pred_uv.shape[0] or current_uv.shape[1] != pred_uv.shape[2]:
+            raise ValueError(
+                "Current EEF UV shapes must align with predicted UV, got "
+                f"pred={tuple(pred_uv.shape)}, current_uv={tuple(current_uv.shape)}, "
+                f"current_valid={tuple(current_valid.shape)}."
+            )
+        if current_valid.shape != current_uv.shape[:3]:
+            raise ValueError(
+                "dino_eef_valid must align with dino_eef_uv, got "
+                f"current_uv={tuple(current_uv.shape)}, current_valid={tuple(current_valid.shape)}."
+            )
+        return current_uv, current_valid.clamp(0.0, 1.0)
+
+    def _build_action_uv_supervision_target(
+        self,
+        batch: Dict[str, Any],
+        pred_uv: torch.Tensor,
+        progress: Optional[torch.Tensor],
+        mode: str,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Dict[str, float]]:
+        metrics = {"uv_supervision_mode_id": float(self._uv_supervision_mode_id(mode))}
+        if mode in ("clean_only", "none"):
+            return None, None, metrics
+        if mode == "flow_interp" and self.generative_mode != "flow_matching":
+            raise ValueError("uv_supervision_mode='flow_interp' is currently only defined for flow_matching.")
+
+        target_uv, target_valid, target_metrics = self._target_uv_tensors(batch, pred_uv)
+        metrics.update(target_metrics)
+        if target_uv is None or target_valid is None:
+            return None, None, metrics
+        if mode == "expert_final":
+            return target_uv, target_valid, metrics
+        if mode != "flow_interp":
+            raise ValueError(f"Unsupported UV supervision mode {mode!r}.")
+        if progress is None:
+            raise ValueError("uv_supervision_mode='flow_interp' requires action-UV progress from flow matching.")
+
+        current_uv, current_valid = self._current_uv_tensors(batch, pred_uv)
+        current_uv_seq = current_uv[:, None, ...].expand_as(target_uv)
+        expert_target_uv = target_uv
+        progress = progress.to(device=pred_uv.device, dtype=pred_uv.dtype).reshape(pred_uv.shape[0])
+        lambda_view = progress.view(-1, 1, 1, 1, 1).clamp(0.0, 1.0)
+        target_uv = (1.0 - lambda_view) * current_uv_seq + lambda_view * expert_target_uv
+
+        valid = target_valid
+        if self.interaction_flow_interp_requires_current_valid:
+            valid = valid * current_valid[:, None, ...]
+        valid = valid.clamp(0.0, 1.0)
+
+        if self.interaction_uv_loss_clamp_target:
+            target_uv = target_uv.clone()
+            target_uv[..., 0] = target_uv[..., 0].clamp(0.0, float(self.interaction_grid_width - 1))
+            target_uv[..., 1] = target_uv[..., 1].clamp(0.0, float(self.interaction_grid_height - 1))
+
+        distance = torch.linalg.norm(expert_target_uv.detach() - current_uv_seq.detach(), dim=-1)
+        valid_count = valid.detach().sum().clamp_min(1.0)
+        metrics.update(
+            {
+                "interp_lambda_mean": float(progress.detach().mean().item()),
+                "interp_current_target_uv_dist": float(((distance * valid.detach()).sum() / valid_count).item()),
+                "interp_target_uv_valid_fraction": float(valid.detach().mean().item()),
+            }
+        )
+        return target_uv, valid, metrics
+
     def _progress_uv_weights(
         self,
         progress: Optional[torch.Tensor],
@@ -2077,11 +2185,16 @@ class GAPPolicy(BasePolicy):
             return None, {}
 
         pred_uv = aux["pred_uv"]
-        target_uv, valid, target_metrics = self._target_uv_tensors(batch, pred_uv)
-        if target_uv is None or valid is None:
-            return None, {}
-
         progress = aux.get("progress")
+        target_uv, valid, target_metrics = self._build_action_uv_supervision_target(
+            batch,
+            pred_uv,
+            progress,
+            self.interaction_uv_supervision_mode,
+        )
+        if target_uv is None or valid is None:
+            return None, target_metrics
+
         uv_loss, metrics = self._action_uv_loss_from_prediction(pred_uv, target_uv, valid, progress)
         metrics.update(target_metrics)
         metrics["uv_loss"] = float(uv_loss.detach().item())
@@ -2100,6 +2213,7 @@ class GAPPolicy(BasePolicy):
             self.interaction_mode != "action_uv"
             or self.action_to_uv_head is None
             or self.interaction_clean_uv_loss_weight <= 0.0
+            or self.interaction_uv_supervision_mode == "none"
         ):
             return None, {}
         clean_progress = torch.full(
@@ -2228,9 +2342,10 @@ class GAPPolicy(BasePolicy):
         if self.interaction_mode == "action_uv":
             aux = context.get("interaction_aux", {}) if context is not None else {}
             uv_loss, uv_metrics = self._action_uv_supervision_loss(batch, aux)
+            if uv_metrics:
+                loss_dict.update(uv_metrics)
             if uv_loss is not None:
                 loss = loss + self.interaction_uv_loss_weight * uv_loss
-                loss_dict.update(uv_metrics)
                 loss_dict["total_loss"] = loss.item()
             clean_uv_loss, clean_uv_metrics = self._clean_action_uv_supervision_loss(batch, nobs, nactions)
             if clean_uv_loss is not None:
@@ -2368,9 +2483,10 @@ class GAPPolicy(BasePolicy):
         if self.interaction_mode == "action_uv":
             aux = context.get("interaction_aux", {}) if context is not None else {}
             uv_loss, uv_metrics = self._action_uv_supervision_loss(batch, aux)
+            if uv_metrics:
+                loss_dict.update(uv_metrics)
             if uv_loss is not None:
                 loss = loss + self.interaction_uv_loss_weight * uv_loss
-                loss_dict.update(uv_metrics)
                 loss_dict["total_loss"] = loss.item()
             clean_uv_loss, clean_uv_metrics = self._clean_action_uv_supervision_loss(batch, nobs, nactions)
             if clean_uv_loss is not None:

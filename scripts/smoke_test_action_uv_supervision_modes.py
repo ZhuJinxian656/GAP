@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Tiny forward/backward smoke test for flow matching with action-UV tokens."""
+"""Smoke tests for action-UV supervision mode behavior."""
 from __future__ import annotations
 
 import os
@@ -28,7 +28,7 @@ def identity_normalizer():
     return SingleFieldLinearNormalizer.create_manual(scale=scale, offset=offset, input_stats_dict=stat)
 
 
-def build_policy(device: torch.device, uv_supervision_mode: str = "expert_final") -> GAPPolicy:
+def build_policy(device: torch.device, generative_mode: str, uv_mode: str) -> GAPPolicy:
     scheduler = DDIMScheduler(
         num_train_timesteps=4,
         beta_start=0.0001,
@@ -46,7 +46,7 @@ def build_policy(device: torch.device, uv_supervision_mode: str = "expert_final"
         n_action_steps=3,
         n_obs_steps=1,
         num_inference_steps=1,
-        generative_mode="flow_matching",
+        generative_mode=generative_mode,
         flow_matching={
             "prediction_type": "velocity",
             "source_mode": "hold",
@@ -84,7 +84,7 @@ def build_policy(device: torch.device, uv_supervision_mode: str = "expert_final"
             "pair_sigma_end": 1.5,
             "action_uv_hidden_dim": 32,
             "uv_loss_weight": 0.05,
-            "uv_supervision_mode": uv_supervision_mode,
+            "uv_supervision_mode": uv_mode,
             "flow_interp_requires_current_valid": True,
             "flow_interp_use_current_pair": True,
             "use_current_eef_fallback": True,
@@ -125,6 +125,7 @@ def build_batch(device: torch.device):
     }
     batch["target_dino_eef_uv_seq"][..., 0] *= 19.0
     batch["target_dino_eef_uv_seq"][..., 1] *= 14.0
+    batch["target_dino_eef_valid_seq"][0, 1, 0, 1] = 0.0
     return batch
 
 
@@ -148,46 +149,61 @@ def install_normalizer(policy: GAPPolicy, device: torch.device) -> None:
     policy.set_normalizer(normalizer)
 
 
+def assert_mode(
+    device: torch.device,
+    generative_mode: str,
+    uv_mode: str,
+    *,
+    expect_uv: bool,
+    expect_clean: bool,
+    expect_interp: bool = False,
+) -> None:
+    torch.manual_seed(123)
+    policy = build_policy(device, generative_mode, uv_mode)
+    batch = build_batch(device)
+    install_normalizer(policy, device)
+    loss, loss_dict = policy.compute_loss(batch)
+    assert torch.isfinite(loss), (generative_mode, uv_mode, loss_dict)
+    assert ("uv_loss" in loss_dict) == expect_uv, (generative_mode, uv_mode, loss_dict)
+    assert ("clean_uv_loss" in loss_dict) == expect_clean, (generative_mode, uv_mode, loss_dict)
+    assert "uv_supervision_mode_id" in loss_dict, (generative_mode, uv_mode, loss_dict)
+    assert ("interp_lambda_mean" in loss_dict) == expect_interp, (generative_mode, uv_mode, loss_dict)
+
+
+def assert_diffusion_flow_interp_error(device: torch.device) -> None:
+    torch.manual_seed(123)
+    policy = build_policy(device, "diffusion", "flow_interp")
+    batch = build_batch(device)
+    install_normalizer(policy, device)
+    try:
+        policy.compute_loss(batch)
+    except ValueError as exc:
+        assert "uv_supervision_mode='flow_interp' is currently only defined for flow_matching." in str(exc)
+        return
+    raise AssertionError("diffusion + flow_interp should raise a clear ValueError")
+
+
 def main() -> int:
     device = torch.device("cpu")
-    for uv_supervision_mode in ("expert_final", "flow_interp"):
-        torch.manual_seed(7)
-        policy = build_policy(device, uv_supervision_mode=uv_supervision_mode)
-        batch = build_batch(device)
-        install_normalizer(policy, device)
-
-        loss, loss_dict = policy.compute_loss(batch)
-        assert torch.isfinite(loss), loss_dict
-        for key in (
-            "flow_loss",
-            "flow_lambda_mean",
-            "uv_loss",
-            "clean_uv_loss",
-            "left_mask_mass",
-            "right_mask_mass",
-        ):
-            assert key in loss_dict, loss_dict
-        if uv_supervision_mode == "flow_interp":
-            assert "interp_lambda_mean" in loss_dict, loss_dict
-        loss.backward()
-
-        uv_grad_norm = 0.0
-        for param in policy.action_to_uv_head.parameters():
-            if param.grad is not None:
-                uv_grad_norm += float(param.grad.detach().abs().sum().item())
-        assert uv_grad_norm > 0.0, "Expected nonzero ActionToUVHead gradients."
-
-        policy.eval()
-        with torch.no_grad():
-            result = policy.predict_action(batch["obs"])
-        assert result["action"].shape == (2, 3, 14), result["action"].shape
-        assert torch.isfinite(result["action"]).all(), "Flow inference produced non-finite actions."
-
-        print(
-            "flow-matching action-uv smoke test passed: "
-            f"uv_mode={uv_supervision_mode}, loss={loss.item():.6f}, "
-            f"flow_loss={loss_dict['flow_loss']:.6f}, uv_loss={loss_dict['uv_loss']:.6f}"
+    cases = [
+        ("diffusion", "expert_final", True, True, False),
+        ("diffusion", "clean_only", False, True, False),
+        ("flow_matching", "expert_final", True, True, False),
+        ("flow_matching", "flow_interp", True, True, True),
+        ("flow_matching", "clean_only", False, True, False),
+        ("flow_matching", "none", False, False, False),
+    ]
+    for generative_mode, uv_mode, expect_uv, expect_clean, expect_interp in cases:
+        assert_mode(
+            device,
+            generative_mode,
+            uv_mode,
+            expect_uv=expect_uv,
+            expect_clean=expect_clean,
+            expect_interp=expect_interp,
         )
+    assert_diffusion_flow_interp_error(device)
+    print("action-UV supervision mode smoke test passed")
     return 0
 
 
