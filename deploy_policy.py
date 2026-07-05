@@ -192,9 +192,14 @@ class GAPPolicyWrapper:
         # Store config
         self.n_action_steps = policy_cfg.n_action_steps
         self.state_dim = policy_cfg.state_dim
-        self.use_triadic_token = policy_cfg.get("use_triadic_token", False)
+        coupling_cfg = policy_cfg.get("coupling", {})
+        coupling_enabled = bool(coupling_cfg.get("enabled", False)) if coupling_cfg is not None else False
+        self.use_triadic_token = bool(policy_cfg.get("use_triadic_token", False)) or coupling_enabled
+        triadic_mode = policy_cfg.get("triadic_mode", "disabled")
+        if self.use_triadic_token and triadic_mode == "disabled":
+            triadic_mode = coupling_cfg.get("feature_mode", "proprio_only_fallback")
         self.triadic_config = TriadicConfig(
-            mode=policy_cfg.get("triadic_mode", "disabled"),
+            mode=triadic_mode,
             include_grippers=policy_cfg.get("triadic_include_grippers", True),
         )
         self.latent_mode = getattr(self.policy_model, "latent_mode", policy_cfg.get("latent_mode", "pi3_full"))

@@ -450,6 +450,7 @@ class GAPPolicy(BasePolicy):
         triadic_hidden_dim=1024,
         triadic_dropout=0.0,
         triadic_include_grippers=True,
+        coupling=None,
         # Optional DINO EEF interaction-field tokens
         use_interaction_field=False,
         interaction_field=None,
@@ -486,6 +487,27 @@ class GAPPolicy(BasePolicy):
         self.dinov3_grid_width = int(dinov3_grid_width)
         self.pi3_grid_height = int(pi3_grid_height)
         self.pi3_grid_width = int(pi3_grid_width)
+
+        coupling_cfg = self._to_plain_dict(coupling)
+        coupling_enabled = bool(coupling_cfg.get("enabled", False))
+        if coupling_enabled:
+            use_triadic_token = True
+            if triadic_mode == "disabled":
+                triadic_mode = coupling_cfg.get("feature_mode", "proprio_only_fallback")
+            triadic_hidden_dim = int(coupling_cfg.get("dim", triadic_hidden_dim))
+            triadic_dropout = float(coupling_cfg.get("dropout", triadic_dropout))
+
+        self.coupling_enabled = bool(use_triadic_token)
+        self.coupling_mode = str(coupling_cfg.get("mode", "current")).lower()
+        self.coupling_update_stride = int(coupling_cfg.get("update_stride", 1))
+        self.coupling_aux_loss_weight = float(coupling_cfg.get("aux_loss_weight", 0.0))
+        if self.coupling_mode not in ("current", "shuffled", "swap_lr", "zero"):
+            raise ValueError(
+                f"Unsupported coupling.mode={self.coupling_mode!r}. "
+                "Expected current, shuffled, swap_lr, or zero."
+            )
+        if self.coupling_update_stride <= 0:
+            raise ValueError("coupling.update_stride must be positive.")
 
         # State encoder (agent_pos)
         self.state_encoder = nn.Linear(state_dim, state_embed_dim)
@@ -805,6 +827,8 @@ class GAPPolicy(BasePolicy):
         cprint(f"  Vision feature dim: {vision_feat_dim}", "cyan")
         cprint(f"  State embed dim: {state_embed_dim}", "cyan")
         cprint(f"  Triadic token: {self.use_triadic_token} ({triadic_mode}, dim={self.triadic_dim})", "cyan")
+        if self.use_triadic_token:
+            cprint(f"  Coupling mode: {self.coupling_mode}", "cyan")
         cprint(f"  Interaction field: {self.use_interaction_field} ({self.interaction_mode})", "cyan")
         if self.interaction_mode == "action_uv":
             cprint(f"  Action-UV supervision: {self.interaction_uv_supervision_mode}", "cyan")
@@ -843,6 +867,56 @@ class GAPPolicy(BasePolicy):
             if not callable(value):
                 data[key] = value
         return data
+
+    def _prepare_coupling_obs(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        if (
+            not self.use_triadic_token
+            or self.coupling_mode == "current"
+            or "triadic_state" not in obs_dict
+        ):
+            return obs_dict
+        prepared = dict(obs_dict)
+        prepared["triadic_state"] = self._apply_coupling_mode(obs_dict["triadic_state"])
+        return prepared
+
+    def _apply_coupling_mode(self, triadic_state: torch.Tensor) -> torch.Tensor:
+        if self.coupling_mode == "current":
+            return triadic_state
+        if self.coupling_mode == "zero":
+            return torch.zeros_like(triadic_state)
+        if self.coupling_mode == "shuffled":
+            if triadic_state.shape[0] <= 1:
+                return torch.zeros_like(triadic_state)
+            return triadic_state[torch.randperm(triadic_state.shape[0], device=triadic_state.device)]
+        if self.coupling_mode == "swap_lr":
+            return self._swap_lr_triadic_state(triadic_state)
+        raise ValueError(f"Unsupported coupling mode {self.coupling_mode!r}.")
+
+    def _swap_lr_triadic_state(self, triadic_state: torch.Tensor) -> torch.Tensor:
+        swapped = triadic_state.clone()
+        dim = swapped.shape[-1]
+        mode = self.triadic_mode
+
+        if mode == "pairwise" and dim >= 6:
+            swapped[..., 0:3] = triadic_state[..., 3:6]
+            swapped[..., 3:6] = triadic_state[..., 0:3]
+            if dim >= 8:
+                swapped[..., 6:7] = triadic_state[..., 7:8]
+                swapped[..., 7:8] = triadic_state[..., 6:7]
+        elif mode == "triadic" and dim >= 9:
+            swapped[..., 0:3] = triadic_state[..., 3:6]
+            swapped[..., 3:6] = triadic_state[..., 0:3]
+            swapped[..., 6:9] = -triadic_state[..., 6:9]
+            if dim >= 11:
+                swapped[..., 9:10] = triadic_state[..., 10:11]
+                swapped[..., 10:11] = triadic_state[..., 9:10]
+        elif mode == "proprio_only_fallback" and dim >= 3:
+            swapped[..., 0:3] = -triadic_state[..., 0:3]
+            if dim >= 5:
+                swapped[..., 3:4] = triadic_state[..., 4:5]
+                swapped[..., 4:5] = triadic_state[..., 3:4]
+
+        return swapped
 
     def _mode_token_count(self, mode: str, *, for_future: bool) -> int:
         if mode in ("none", "dino_only", "pi3_none", "interaction_state"):
@@ -1946,6 +2020,7 @@ class GAPPolicy(BasePolicy):
             result: dict with 'action' key
         """
         raw_obs_dict = obs_dict
+        obs_dict = self._prepare_coupling_obs(obs_dict)
 
         # Normalize input
         nobs = self.normalizer.normalize(obs_dict)
@@ -2259,7 +2334,8 @@ class GAPPolicy(BasePolicy):
 
     def _compute_flow_matching_loss(self, batch):
         """Compute optional flow-matching loss in normalized action space."""
-        nobs = self.normalizer.normalize(batch["obs"])
+        obs_dict = self._prepare_coupling_obs(batch["obs"])
+        nobs = self.normalizer.normalize(obs_dict)
         nactions = self.normalizer["action"].normalize(batch["action"])
 
         B = nactions.shape[0]
@@ -2377,7 +2453,8 @@ class GAPPolicy(BasePolicy):
             return self._compute_flow_matching_loss(batch)
 
         # Normalize
-        nobs = self.normalizer.normalize(batch["obs"])
+        obs_dict = self._prepare_coupling_obs(batch["obs"])
+        nobs = self.normalizer.normalize(obs_dict)
         nactions = self.normalizer["action"].normalize(batch["action"])
 
         B = nactions.shape[0]

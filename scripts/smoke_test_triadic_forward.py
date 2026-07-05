@@ -55,7 +55,7 @@ def main() -> int:
         decoder_dim_feedforward=32,
     )
 
-    def make_batch(include_triadic: bool):
+    def make_batch(include_triadic: bool, triadic_dim: int = 11):
         obs = {
             "dinov3_features": torch.randn(2, 1, 300, 16),
             "agent_pos": torch.randn(2, 14),
@@ -65,8 +65,8 @@ def main() -> int:
             "agent_pos": torch.randn(8, 14),
         }
         if include_triadic:
-            obs["triadic_state"] = torch.randn(2, 11)
-            normalizer_data["triadic_state"] = torch.randn(8, 11)
+            obs["triadic_state"] = torch.randn(2, triadic_dim)
+            normalizer_data["triadic_state"] = torch.randn(8, triadic_dim)
         batch = {
             "obs": obs,
             "action": torch.randn(2, 2, 14),
@@ -86,6 +86,24 @@ def main() -> int:
         loss, loss_dict = policy.compute_loss(batch)
         assert torch.isfinite(loss), loss_dict
         print(f"ok use_triadic={use_triadic}: loss={loss.item():.6f}")
+
+    for mode in ("current", "shuffled", "swap_lr", "zero"):
+        kwargs = dict(common_kwargs)
+        kwargs["coupling"] = {
+            "enabled": True,
+            "mode": mode,
+            "feature_mode": "proprio_only_fallback",
+            "dim": 16,
+        }
+        policy = GAPPolicy(**kwargs).to(device)
+        batch, normalizer_data = make_batch(True, triadic_dim=5)
+        normalizer = LinearNormalizer()
+        normalizer.fit(normalizer_data, last_n_dims=1)
+        normalizer["dinov3_features"] = SingleFieldLinearNormalizer.create_identity()
+        policy.set_normalizer(normalizer)
+        loss, loss_dict = policy.compute_loss(batch)
+        assert torch.isfinite(loss), loss_dict
+        print(f"ok coupling_mode={mode}: loss={loss.item():.6f}")
     return 0
 
 

@@ -106,6 +106,14 @@ policy:
   triadic_hidden_dim: 1024
   triadic_dropout: 0.0
   triadic_include_grippers: true
+  coupling:
+    enabled: false
+    mode: current  # current | shuffled | swap_lr | zero
+    feature_mode: proprio_only_fallback  # pairwise | triadic | proprio_only_fallback
+    dim: 1024
+    dropout: 0.0
+    update_stride: 1
+    aux_loss_weight: 0.0
 
   # Transformer decoder config (for denoising)
   decoder_depth: 4
@@ -184,6 +192,7 @@ training:
   rollout_every: 150
   checkpoint_every: 150
   val_every: 150
+  val_ratio: 0.0
   sample_every: 20
   max_train_steps: null
   max_val_steps: null

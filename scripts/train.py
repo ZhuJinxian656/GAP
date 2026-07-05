@@ -74,6 +74,14 @@ def main(cfg: OmegaConf):
     cprint(f"  Zarr path: {zarr_path}", "cyan")
     cprint(f"  Seed: {seed}", "cyan")
 
+    policy_cfg = cfg.policy
+    coupling_cfg = policy_cfg.get("coupling", {})
+    coupling_enabled = bool(coupling_cfg.get("enabled", False)) if coupling_cfg is not None else False
+    use_triadic_token = bool(policy_cfg.get("use_triadic_token", False)) or coupling_enabled
+    triadic_mode = policy_cfg.get("triadic_mode", "disabled")
+    if use_triadic_token and triadic_mode == "disabled":
+        triadic_mode = coupling_cfg.get("feature_mode", "proprio_only_fallback")
+
     # Create dataset
     dataset = GAPDataset(
         zarr_path=zarr_path,
@@ -81,18 +89,18 @@ def main(cfg: OmegaConf):
         pad_before=cfg.n_obs_steps - 1,
         pad_after=cfg.n_action_steps - 1,
         seed=seed,
-        val_ratio=0.0,
+        val_ratio=cfg.training.get("val_ratio", 0.0),
         max_train_episodes=expert_data_num,
         task_name=task_name,
         use_pi3_features=cfg.get("use_pi3_features", True),
         model_3d=model_3d,
-        use_triadic_token=cfg.policy.get("use_triadic_token", False),
-        triadic_mode=cfg.policy.get("triadic_mode", "disabled"),
-        latent_mode=cfg.get("latent_mode", cfg.policy.get("latent_mode", "pi3_full")),
-        use_future_loss=cfg.get("use_future_loss", cfg.policy.get("use_future_loss", True)),
-        future_target_mode=cfg.get("future_target_mode", cfg.policy.get("future_target_mode", "pi3_full")),
-        use_interaction_field=cfg.policy.get("use_interaction_field", False),
-        interaction_field_mode=cfg.policy.get("interaction_field", {}).get("mode", "disabled"),
+        use_triadic_token=use_triadic_token,
+        triadic_mode=triadic_mode,
+        latent_mode=cfg.get("latent_mode", policy_cfg.get("latent_mode", "pi3_full")),
+        use_future_loss=cfg.get("use_future_loss", policy_cfg.get("use_future_loss", True)),
+        future_target_mode=cfg.get("future_target_mode", policy_cfg.get("future_target_mode", "pi3_full")),
+        use_interaction_field=policy_cfg.get("use_interaction_field", False),
+        interaction_field_mode=policy_cfg.get("interaction_field", {}).get("mode", "disabled"),
     )
 
     # Get normalizer
@@ -107,6 +115,17 @@ def main(cfg: OmegaConf):
         pin_memory=cfg.dataloader.pin_memory,
         persistent_workers=cfg.dataloader.persistent_workers,
     )
+    val_dataloader = None
+    if cfg.training.get("val_ratio", 0.0) > 0:
+        val_dataset = dataset.get_validation_dataset()
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=cfg.val_dataloader.batch_size,
+            num_workers=cfg.val_dataloader.num_workers,
+            shuffle=cfg.val_dataloader.shuffle,
+            pin_memory=cfg.val_dataloader.pin_memory,
+            persistent_workers=cfg.val_dataloader.persistent_workers,
+        )
 
     # Create policy
     cprint("\nCreating GAP policy...", "green")
@@ -161,6 +180,7 @@ def main(cfg: OmegaConf):
         policy.train()
 
         epoch_loss = 0.0
+        epoch_loss_count = 0
         with tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{cfg.training.num_epochs}") as pbar:
             for batch_idx, batch in enumerate(pbar):
                 if cfg.training.max_train_steps is not None and batch_idx >= cfg.training.max_train_steps:
@@ -196,6 +216,7 @@ def main(cfg: OmegaConf):
 
                 # Logging
                 epoch_loss += loss.item()
+                epoch_loss_count += 1
                 pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
                 # Log to wandb
@@ -212,7 +233,7 @@ def main(cfg: OmegaConf):
                     wandb.log(log_dict, step=global_step)
 
         # Epoch summary
-        avg_epoch_loss = epoch_loss / len(train_dataloader)
+        avg_epoch_loss = epoch_loss / max(1, epoch_loss_count)
         cprint(f"Epoch {epoch+1} - Avg Loss: {avg_epoch_loss:.4f}", "yellow")
 
         if use_wandb:
@@ -220,6 +241,51 @@ def main(cfg: OmegaConf):
                 "train/epoch_loss": avg_epoch_loss,
                 "train/epoch": epoch,
             }, step=global_step)
+
+        if (
+            val_dataloader is not None
+            and cfg.training.val_every is not None
+            and (epoch + 1) % cfg.training.val_every == 0
+        ):
+            policy.eval()
+            val_loss = 0.0
+            val_loss_count = 0
+            val_metrics = {}
+            with torch.no_grad():
+                with tqdm(val_dataloader, desc=f"Val {epoch+1}/{cfg.training.num_epochs}") as pbar:
+                    for val_idx, batch in enumerate(pbar):
+                        if cfg.training.max_val_steps is not None and val_idx >= cfg.training.max_val_steps:
+                            break
+                        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                        loss, loss_dict = policy.compute_loss(batch)
+                        val_loss += loss.item()
+                        val_loss_count += 1
+                        for key, value in loss_dict.items():
+                            if isinstance(value, (int, float)):
+                                val_metrics.setdefault(key, []).append(float(value))
+                        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+
+            avg_val_loss = val_loss / max(1, val_loss_count)
+            avg_val_metrics = {
+                key: float(np.mean(values))
+                for key, values in val_metrics.items()
+                if values
+            }
+            cprint(f"Epoch {epoch+1} - Val Loss: {avg_val_loss:.4f}", "yellow")
+            if avg_val_metrics:
+                cprint(
+                    "  Val metrics: "
+                    + ", ".join(f"{key}={value:.6f}" for key, value in sorted(avg_val_metrics.items())),
+                    "yellow",
+                )
+            if use_wandb:
+                log_dict = {
+                    "val/loss": avg_val_loss,
+                    "val/epoch": epoch,
+                }
+                for key, value in avg_val_metrics.items():
+                    log_dict[f"val/{key}"] = value
+                wandb.log(log_dict, step=global_step)
 
         # Save checkpoint
         save_ckpt = bool(cfg.get("checkpoint", {}).get("save_ckpt", True))
